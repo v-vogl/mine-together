@@ -8,6 +8,8 @@ User=minetogether
 WorkingDirectory=/opt/mine-together
 ExecStart=/opt/mine-together/mine-together-server
 Environment=HOST=127.0.0.1 PORT=8080 DATA_DIR=/var/lib/mine-together CONSOLE_FIFO=/run/mine-together/console
+# Caddy passes the player's real address on in this header (needed for the per-address limits).
+Environment=TRUST_IP_HEADER=x-forwarded-for
 # The console pipe: `echo rain | sudo tee /run/mine-together/console`
 RuntimeDirectory=mine-together
 ExecStartPre=/usr/bin/mkfifo -m 660 /run/mine-together/console

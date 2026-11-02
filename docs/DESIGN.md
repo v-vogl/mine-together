@@ -23,9 +23,11 @@ each player can act on one cell every few seconds. Together they dig down as far
 | Air | empty | - |
 | Rock | static | mine: removes it, +1 rock; place on an air or water cell (1 rock, dig cooldown; needs support in the open sky) |
 | Water | falls, spreads sideways every tick | collect: removes it, +1 water; pour out on an air cell (1 water, collect cooldown) |
-| Wall | static, blocks water; intact, cracked, crumbling | build on an air or water cell (3 rock); dig cracks it one stage, the third dig breaks it (+1 rock); the wall tool repairs a cracked wall (1 rock) |
-| Spongestone ore | static, in veins from 15 below the surface | mine: removes it, +1 spongestone |
-| Spongestone | placed block; soaks up one neighbouring water cell every 2 s | place on an air or water cell (1 spongestone); mine: +1 spongestone |
+| Wall | static, blocks water; intact, cracked, crumbling | build on an air or water cell (2 rock); dig cracks it one stage, the third dig breaks it (+2 rock, the full cost); the wall tool repairs a cracked wall (free) |
+| Spongerock ore | static, in veins from 15 below the surface | mine: removes it, +1 spongerock |
+| Quartz | static, in spiky clusters from 30 below the surface; also a placed block | mine: +1 quartz; place on an air or water cell (1 quartz, place cooldown; needs support in the open sky), to build with or hand to others |
+| Amethyst | static, in columns from 140 m; also a placed block | mine: +1 amethyst; place like quartz (1 amethyst) |
+| Spongerock | placed block; soaks up one neighbouring water cell every 2 s | place on an air or water cell (1 spongerock); mine: +1 spongerock |
 | Rubble | falls 2 cells per tick through air, sinks 1 cell every other tick through water (swapping places with it, so no water is lost), slides off heaps, now and then sticks on a slope; solid once it rests, falls again when undermined | drop on an air or water cell, anywhere (1 rock, dig cooldown); mine: +1 rock |
 | Bedrock | static, unbreakable; the island's side walls and the bottom | none ("too hard to dig") |
 
@@ -33,17 +35,35 @@ each player can act on one cell every few seconds. Together they dig down as far
 time, each first found at a certain depth, so digging deeper means discovering something new. Gems (and gems as paint)
 were removed for now. A material's toolbar slot appears once the player has mined some.
 
-1. **Spongestone** (from 15 below the surface, so a lone digger finds some soon): porous yellow-ochre rock. Inert in the ground (otherwise pockets next to
+1. **Spongerock** (from 15 below the surface, so a lone digger finds some soon): porous yellow-ochre rock. Inert in the ground (otherwise pockets next to
    it would silently drain); mined and placed as a block, it soaks up one neighbouring water cell every 2 seconds. The
-   flood fixer. About one vein per 3150 cells, radius 1.5 to 4.55.
+   flood fixer. About one vein per 3150 cells, radius 1.5 to 4.55, plus one per 80 columns in the 60 rows where it starts.
 2. **Quartz** (from 30 below the surface): the lowest tier of upgrade crystals (higher tiers, up to diamond, may follow
    deeper). Pale pink crystal clusters: a plus-shaped core with 4 to 6 straight or diagonal spikes of 2 to 4 cells, unlike
-   spongestone's round blobs; about one per 7000 cells. Mined: +1 quartz, spent on pickaxe upgrades.
+   spongerock's round blobs; about one per 7000 cells, plus one per 150 columns in the 60 rows where it starts. Mined: +1 quartz, spent on pickaxe upgrades.
+3. **Amethyst** (from 140 below the surface, just above the second layer): the second tier of upgrade crystals. A
+   druse of 3 to 5 upright purple crystal columns, 2 to 5 cells tall; about one cluster per 12,000 cells. Spent on
+   heavy strikes: 3 amethyst for level 1 (every hit on rock does 2 damage), 10 more for level 2 (3 damage).
+4. **Swellcoral** (decided 2026-11-02, from 60 below the surface): fleshy pink coral with breathing polyps. Found as
+   small branching reefs (3 to 7 cells tall, forking) standing on the floor of water pockets, about one per 50,000
+   cells: unlike everything else it lies inside water, so players drain a pocket to get at it. Reef coral sleeps.
+   Planted by a player it is alive: every second a third of the living coral grows, into a water cell next to it
+   (the water becomes coral) or, if there is none, one cell through air towards water at most 4 cells away; far
+   from water it rests. Turns a flood into solid ground, grows a flooded shaft shut, builds bridges over lakes.
+   Mined (reef or grown): +1 swellcoral, so a pool of water and one coral make a coral farm.
+5. **Emberstone** (decided 2026-11-02, from 90 below the surface): near-black rock with glowing orange cracks, in long
+   thin seams that run roughly sideways (8 to 24 cells, now and then stepping a row), about one per 40,000 cells,
+   never generated next to water. Every second each emberstone boils one water cell next to it into **steam**.
+   Steam rises through air and water (the water drops into its place), creeps under ceilings, and each tick one
+   steam cell in 120 wears down a wall (one stage) or rock (one hit; what breaks falls as rubble) next to it.
+   It condenses back into water after about 15 s, or drifts off into the sky above the surface. A flood that reaches
+   a seam turns into a steam pocket that eats its own ceiling; placed emberstone drains water but endangers the
+   walls around it.
 
 **Springs** (decided 2026-11-02): damp rock (wet-looking, from 30 below the surface, about one cell per 35,000) opens
 a spring when dug; a few more springs lie hidden at the bottom of water pockets. A spring cannot be dug; it pushes out
 a water cell every 0.3 s into open air next to it, or through the water around it up to 12 rows above itself, until
-every side is plugged (walls, rubble, spongestone). A flood with a clear target the crowd can fix. Like rain, it scales
+every side is plugged (walls, rubble, spongerock). A flood with a clear target the crowd can fix. Like rain, it scales
 with the players online: 20% of that alone (one cell every 1.5 s, slower than one player scoops), 60% at 10 players,
 full strength from 100.
 
@@ -52,13 +72,58 @@ both sides, so rooms up to 30 wide hold. After a dig nearby, an unstable ceiling
 and falls as rubble 5-15 s later if nothing was built underneath; each fall checks the ceiling above, so wide caverns
 crumble into arches. Walls, rubble and rock under a ceiling hold it: pillars matter. Pending checks are not saved.
 
+**One address, three players** (decided 2026-11-02): players are identified by a browser token, so one person with a
+script could open many connections. All players on one internet address share 3 cooldowns (the address acts like at
+most 3 players), count at most 3 times towards the players online (speed and rain scaling), and may open at most 10
+connections. The real address comes from the proxy's header (TRUST_IP_HEADER: cf-connecting-ip behind the tunnel,
+x-forwarded-for behind Caddy). Players on the server's own machine, the dev client and bots with the dev key are exempt.
+
+**Milestones** (decided 2026-11-02): announced to everyone as a gold notice: every new record depth of 25, 50, 75, 100 m,
+then every 50 m; the first spongerock, the first quartz, the first spring opened. Saved per world in milestones.json.
+New players see "Click a cell to dig" until their first dig (once per browser).
+
+**Art style** (decided 2026-11-02): away from a block-game look. Each cell is one flat colour; patterns run across
+many cells (strata, stripes, columns, veins) so the ground reads as one painted mass. Carved edges (rounded corners
+next to open space, light top edges) were tried and are off by default; the E key switches them on while the user
+decides. No grass blocks: dirt with a mossy rim
+and tufts growing into the air. Walls stay crisp bricks, being the one thing players build.
+
+**Kinds of rock** (decided 2026-11-02): a crust of dirt (2-3 cells, 1 hit) lies under the surface; below it the
+layers are stone, granite, slate, basalt and darkstone. Each kind looks different (dirt brown under a rim of moss and grass tufts, stone
+warm sandstone in wavy strata, granite pink-grey with grains, slate blue-grey stripes, basalt black columns, darkstone
+purple-black with red veins), is
+its own resource with its own hotbar slot (the deeper ones appear once found), and a placed block keeps its kind's
+hardness, so deep rock makes strong defences. Walls, rubble and the wall unlock cost stone.
+
+**Deeper is harder** (decided 2026-11-02): the rock layers (160 rows each) get harder: rock takes 1, 3, 5, 8 and 12 hits
+in layers 1 to 5 (a curve; upgrades make it easier); a hit rock shows as chipped with the hits it has left. Each rock
+cell's layer is its own cell type, fixed when the world is made, and layers blend in patches: from 30 rows above a
+boundary to 30 below it a growing share of the rock is the deeper kind (half of it at the boundary). The colour shows
+the layer, so players can see the hard patches coming. Cave-ins come sooner deeper
+down: the widest room that holds shrinks from 30 cells in the top layer to 24, 20, 16 and 14, so a deep dig needs walls
+as props.
+
+**Walls see and grow** (decided 2026-11-02): a wall and the cells next to it are always visible, even deep under water,
+and a wall can be built (or repaired) on any open cell (air or water) next to another wall, out of reach of open air:
+a crowd can wall its way down into a flooded shaft. Never into rock, spongerock, quartz or other solid ground.
+
+**Leaderboard** (decided 2026-11-02): one category for now, blocks mined (all time). Opened from a small trophy in the
+top bar (or L), so it costs no screen space otherwise: the top 10 and your own place. Players have no accounts yet, so
+each gets a stable made-up name from their browser token ("Dusty Mole 42").
+
+**Saving progress** (decided 2026-11-02): play stays anonymous, no login in front of the game. The menu (Esc, or the
+☰ in the top bar) shows the player's recovery code (their browser token in groups of four) to copy, and a field to
+enter a code from another browser, which switches that browser to the code's player. Later, once the game runs on
+its own domain: optional sign-in with Twitch or Discord linked to the same player, and Cloudflare Turnstile against
+bots.
+
 **Upgrades** (decided 2026-11-01): an Upgrades panel (key U) appears once a player has 10 rock or has found quartz.
 - Walls are locked for new players; unlocking them costs 10 rock. Rubble is always available.
 - Pickaxe levels 1 to 5: level n digs (1 + 0.1 n) times as fast (not scooping or building); level n to n + 1 costs
-  n + 1 quartz (15 quartz in all for x1.5).
+  2^(n + 1) - 1 quartz: 1, 3, 7, 15, 31 (57 quartz in all for x1.5; changed 2026-11-02 from n + 1).
 
 **Walls take three hits** (decided 2026-11-01): griefers can break walls, but defenders can keep up. Each dig cracks a
-wall one stage (intact, cracked, crumbling, gone); the wall tool repairs a cracked wall for 1 rock with the dig cooldown,
+wall one stage (intact, cracked, crumbling, gone); the wall tool repairs a cracked wall for free with the dig cooldown,
 so one defender holds a wall against one attacker, but not against a group.
 
 ### Water
@@ -68,6 +133,37 @@ so one defender holds a wall against one attacker, but not against a group.
 - Players can collect water cell by cell.
 - Water pockets are finite, so a flood ends and can be cleared; the world must never get stuck in a state players
   cannot fix.
+
+### The Upwelling (decided 2026-11-02)
+
+The second event after rain, and the one that adds to the world instead of taking from it. Every 30 to 60 minutes
+(console: `upwell`), strength scaled with the players online like rain (40% alone, full from 100 players).
+
+1. **Stirring** (30 s): announcement "The deep is stirring…", the view trembles slightly, "the deep is stirring…" in
+   the top bar.
+2. **Veins rising**: 3 to 8 roots start just above bedrock and grow upwards one cell per tick, wandering and forking
+   (each branch with part of its parent's remaining length, at most 48 tips), so the deep layers get a web of veins
+   and the stone near the top one or two. Molten veins glow, also in shadow, so one coming up shows before it breaks
+   in. A branch that breaks into a tunnel spews magma there for up to 40 s. The **main vein** always reaches the
+   surface (about 100 s for a 900-row world); crossing a tunnel it spews into it and carries on above it.
+3. **Eruption**: where the main vein reaches the sky, a volcano pours magma for 90 to 180 s, 1.75 to 2.5 cells per
+   tick; a third of it is thrown up as lava bombs up to 14 cells away. Magma buried in its own pool is pushed out
+   through it, so the pool overflows down the sides, and the vent climbs through its own cooled rock: a mountain
+   about 65 cells tall for one player, bigger for a crowd. The view shakes for 2.5 s when it breaks through.
+4. **Cooling**: the veins cool over about a minute into lava rock, with materials of their depth scattered along
+   them (spongerock, quartz, emberstone, amethyst) and, rarely, deep down, a fire opal.
+
+**Cataclysm** (console `cataclysm`, never on its own): an Upwelling at full strength with four times the roots and
+fork limit, and five main veins whose columns are spread evenly over the island, each erupting as a supervolcano
+(three times the pour rate, twice the time, lava bombs 1.7 times as far). Measured on a 2048 x 1024 world: five
+mountains 50 to 120 cells tall, about 26,000 cells of new land, 93,000 cells of veins; at most 36 ms per tick.
+
+Magma: a thick liquid (moves every third tick, piles up). Water touching it turns it into lava rock at once and
+boils into steam. It falls freely and hardens on its own after a while (not while falling; slowly in the open
+and in tunnels, very slowly inside a pool). Its heat breaks walls stage by stage, melts rubble into more magma, and burns spongerock and coral: built
+blocks only hold it back for a while, water is what stops it (unlike floods, which walls stop). Lava rock: two hits
+(one with heavier strikes), its own resource, placeable. Fire opal: rare, only collected and placed for now.
+Magma and veins cannot be dug. An Upwelling is not saved: after a restart veins still molten are lava rock.
 
 ### Actions and cooldowns
 
@@ -84,14 +180,14 @@ so one defender holds a wall against one attacker, but not against a group.
 
 ### Prototype values (to tune after playtests)
 
-- Cooldown: dig 1.5 s, collect water 2.5 s (slower than digging, so floods last), place spongestone 3 s, build a wall 4 s
+- Cooldown: dig 1.5 s, collect water 2.5 s (slower than digging, so floods last), place spongerock 3 s, build a wall 4 s
   (repairing one takes the dig cooldown, so does dropping rubble).
 - These cooldowns are for 100 players. Action speed scales with the players online (decided 2026-11-01):
   speed = 2 - 0.5 * log10(players), clamped to 0.5-2, and cooldowns are divided by it: 1 player x2, 10 players x1.5,
   100 players x1, 300 players x0.76, 1000 or more x0.5. Several tabs of one guest count once. The HUD shows the speed.
   Water, rain and the ocean are not affected. One cooldown per player, shared by all actions and
   by all tabs of the same guest.
-- A wall costs 3 rock and takes three digs to break, giving 1 rock back; repairing a cracked wall costs 1 rock.
+- A wall costs 2 rock and takes three digs to break, giving the 2 rock back; repairing a cracked wall is free.
 - In the open sky (above the original surface) a wall or block must touch something solid: no floating blocks or pictures
   in the sky, but towers and bridges built out from the ground are fine. Underground anything goes.
 - Shadow: cells within 2 steps of a revealed cell (a 5x5 square without its corners).
@@ -123,7 +219,7 @@ so one defender holds a wall against one attacker, but not against a group.
   the sky shows behind it) dries up, the top cell of each column with a 2% chance per second, so a flooded island
   drains within a few minutes. Lakes, the sea and water in dug-out space (grey back wall) never evaporate.
 - Water pockets: fewer but bigger deeper down. Measured on a 1024 x 1024 world: average pocket about 200 cells near the
-  top, about 720 at the bottom, the biggest a few thousand; about 5-7% of the underground is water. Spongestone veins replace
+  top, about 720 at the bottom, the biggest a few thousand; about 5-7% of the underground is water. Spongerock veins replace
   rock only, so they never split a pocket and often sit right next to one.
 - World: 2048 x 1024 (WORLD_W / WORLD_H to change), a small crater at the bottom of the bowl as the starting point.
   Generating it takes 0.3 s; the server needs about 3 bytes per cell (6 MB).
@@ -135,15 +231,16 @@ so one defender holds a wall against one attacker, but not against a group.
 - Rubble (decided 2026-11-01): a flooded tunnel could not be fixed, because players only reach the top layer of the
   water. Rubble is dropped on the surface and sinks to the bottom, so a crowd fills a flooded shaft from the bottom up
   until it covers the leak. Falling rubble counts as open space for light, so it never darkens the shaft below it.
-- The ocean is endless but can be breached (decided 2026-11-01): it pours into any open space at the island's edge
-  columns below sea level and into open cells of the sea strip that touch water (a dry tunnel under the seabed stays
-  dry), lowest cells first, at most 2 cells per tick per side (20 per
-  second), so a drained sea fills back up to exactly sea level. A griefer can dig a tunnel from the sea
-  into the main dig: the sea strip gushes in first, then a steady stream follows, and the crowd must wall off the leak
-  where it enters or scoop faster than it flows. Water above sea level in the seas runs off. The coast and seabed are
-  ordinary rock; bedrock is only the bottom two rows of the world. Past the edges the client draws each row exactly like
-  the island's edge column on that row (sky, visible water, or black), so the ocean lines up even while a breach drains
-  the sea, and deep water is black on both sides.
+- The ocean is endless but can be breached (decided 2026-11-01, changed 2026-11-03): only the island's two edge
+  columns act as the ocean; everything beyond them is drawn, never simulated. Below sea level every open cell of an
+  edge column is water, and it never runs empty: on one tick in three it flows on like pushed water (sideways, down,
+  or through the water it touches into air up to sea level) and leaves water behind. A breach gushes in through its
+  whole height at once (a cave of 4800 cells fills to sea level in about 25 s) and fills what it reaches up to sea
+  level. Stopping it means walling off the openings. The sea strip fills back up to sea
+  level, 2 cells per tick per side, through open cells that touch water (a dry tunnel under the seabed stays dry).
+  Water above sea level in the seas runs off. The coast and seabed are ordinary rock; bedrock is only the bottom two
+  rows of the world. Past the edges the client draws one continuous ocean: bright for 4 rows below sea level, then
+  fading into the dark deep, and lit within a few cells of any breach where the edge column holds visible water.
 - Surface lakes: one small lake right next to the crater, so new players can play with water at once, and up to four
   more where the bowl is fairly level. Lakes are generated full and still; rain makes them overflow.
 - Guests: the browser keeps a random token; inventory is stored per token on the server.
@@ -156,8 +253,8 @@ so one defender holds a wall against one attacker, but not against a group.
 - Fragment shader: palette per cell type, per-cell shade noise (from the cell position), shadow rows, water animation,
   material textures.
 - Pan and zoom like r/place; click to act; cooldown, inventory and depth in HTML.
-- The world's edges stay invisible: past the left and right edges the client draws the ocean like deep water (4 rows
-  visible, then black), and below the bottom everything is black, so nobody can see how wide or deep the world goes.
+- The world's edges stay invisible: past the left and right edges the client draws the ocean (bright near the surface,
+  fading into darkness), and below the bottom everything is black, so nobody can see how wide or deep the world goes.
   The camera cannot drift far outside the world.
 - Keeps only chunks around the viewport.
 

@@ -8,6 +8,9 @@ use crate::noise::{self, Rng};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
+mod upwelling;
+pub use upwelling::UpwellingNews;
+
 pub const CHUNK: usize = 64;
 
 pub const AIR: u8 = 0;
@@ -17,7 +20,7 @@ pub const WATER: u8 = 2;
 pub const WALL: u8 = 3;
 pub const WALL_CRACKED: u8 = 4;
 pub const WALL_CRUMBLING: u8 = 5;
-/// Spongestone, the first material players discover (from SPONGE_DEPTH down): porous yellow rock.
+/// Spongerock, the first material players discover (from SPONGE_DEPTH down): porous yellow rock.
 /// In the ground it does nothing; mined and placed as a block, it soaks up a neighbouring water cell
 /// every few seconds.
 pub const SPONGE_ORE: u8 = 6;
@@ -31,7 +34,7 @@ pub const RUBBLE_FALLING: u8 = 9;
 /// Unbreakable stone: the world's bottom.
 pub const BEDROCK: u8 = 10;
 /// Quartz, the lowest tier of the upgrade crystals (from QUARTZ_DEPTH down): small pale pink crystal
-/// clusters, rarer than spongestone. Players spend it on pickaxe upgrades.
+/// clusters, rarer than spongerock. Players spend it on pickaxe upgrades.
 pub const QUARTZ_ORE: u8 = 11;
 /// Damp rock: rock with a spring behind it, wet-looking so players can see it coming. Digging it opens
 /// a SPRING, which pours out water (from its open sides) until players plug every side.
@@ -42,6 +45,91 @@ pub const SPRING: u8 = 13;
 /// A ceiling about to cave in (see CAVE_SPAN): cracked rock that falls as rubble soon, unless something
 /// is built underneath to hold it.
 pub const ROCK_CRACKED: u8 = 14;
+/// Rock of each layer, top first: stone (plain ROCK), granite, slate, basalt, darkstone.
+pub const ROCK_LAYERS: [u8; 5] = [ROCK, 26, 27, 28, 29];
+/// Dirt: a thin crust, DIRT_ROWS deep, right under the surface.
+pub const DIRT: u8 = 31;
+/// Every kind of rock, each its own resource: dirt, then the layers. Players collect them separately, and a
+/// placed block keeps its kind's hardness.
+pub const ROCK_KINDS: [u8; 6] = [DIRT, ROCK, 26, 27, 28, 29];
+/// Hits it takes to break each kind: deeper rock is much harder.
+const KIND_HITS: [u8; 6] = [1, 1, 3, 5, 8, 12];
+/// Rock that has been hit but not broken yet keeps its kind: each kind that takes several hits has a run of
+/// types from here on, one per number of hits left (see worn).
+const WORN_BASE: u8 = 32;
+/// Amethyst, the second tier of upgrade crystals (from AMETHYST_DEPTH down, a little above layer 2):
+/// clusters of upright purple crystal columns. Spent on heavier strikes (more damage per hit).
+pub const AMETHYST_ORE: u8 = 30;
+
+/// Magma, poured out by an Upwelling (see upwelling.rs): a thick liquid that flows slowly and piles up. It
+/// hardens into lava rock where it meets air, and at once where it meets water (boiling that water into
+/// steam). Its heat slowly breaks walls and other built blocks next to it: they hold it back for a while,
+/// but only water stops it.
+pub const MAGMA: u8 = 15;
+/// A molten vein of an Upwelling, growing through the rock. Cools into lava rock (and now and then a
+/// material) when the Upwelling is over.
+pub const MOLTEN: u8 = 16;
+/// Lava rock: cooled magma, dark and porous, its own resource. Two hits to break (chipped after one).
+pub const LAVA_ROCK: u8 = 17;
+pub const LAVA_ROCK_CHIPPED: u8 = 18;
+/// Fire opal: a rare gem left in cooled veins deep down. For now only collected and placed.
+pub const FIRE_OPAL: u8 = 19;
+
+/// Swellcoral, found as small branching reefs on the floor of water pockets (from CORAL_DEPTH down), so it
+/// is only reached by draining a pocket. Reef coral sleeps. Coral a player plants (CORAL) is alive: it grows
+/// into water next to it, turning that water into coral, and reaches through air towards water a few cells
+/// away (see grow_coral). Planted in a flooded shaft, it grows the shaft shut.
+pub const CORAL_ORE: u8 = 56;
+pub const CORAL: u8 = 57;
+/// Emberstone, in long thin seams (from EMBER_DEPTH down): hot rock that boils the water next to it into
+/// steam (see boil).
+pub const EMBER: u8 = 58;
+/// Steam: rises through air and water, gathers under ceilings, and slowly wears down the walls and rock it
+/// touches, until it condenses back into water or drifts off into the sky (see move_steam).
+pub const STEAM: u8 = 59;
+
+/// The rock layers (the colour bands players see) are this many rows thick.
+pub const LAYER_ROWS: usize = 160;
+/// Layers blend into each other: from this many rows above a boundary to as many below it, a growing share
+/// of the rock belongs to the deeper layer (half of it right at the boundary), in patches.
+/// Cave-ins (see CAVE_SPAN): how far open space under a ceiling may reach to both sides in each layer before
+/// it caves in. Deeper rock holds smaller rooms, so the deeper the dig, the more it needs walls as props.
+const CAVE_SPANS: [i64; 5] = [15, 12, 10, 8, 7];
+
+/// Which rock layer `depth` cells below the surface lies in (0 at the top).
+pub fn layer(depth: usize) -> usize {
+    (depth / LAYER_ROWS).min(ROCK_LAYERS.len() - 1)
+}
+
+fn worn_base(kind: usize) -> u8 {
+    WORN_BASE + KIND_HITS[..kind].iter().map(|h| h - 1).sum::<u8>()
+}
+
+/// The type of rock of this kind (index into ROCK_KINDS) worn down to `left` hits (at least 1, fewer than
+/// the kind takes fresh).
+pub fn worn(kind: usize, left: u8) -> u8 {
+    worn_base(kind) + left - 1
+}
+
+/// For rock of any kind, fresh or worn down: its kind (index into ROCK_KINDS) and the hits still needed.
+pub fn rock_state(t: u8) -> Option<(usize, u8)> {
+    if let Some(k) = ROCK_KINDS.iter().position(|&r| r == t) {
+        return Some((k, KIND_HITS[k]));
+    }
+    (0..ROCK_KINDS.len()).find_map(|k| {
+        let base = worn_base(k);
+        (t >= base && t < base + KIND_HITS[k] - 1).then(|| (k, t - base + 1))
+    })
+}
+
+/// Plain rock in any state: of any kind, worn by hits, or cracked by a cave-in.
+pub fn is_rock(t: u8) -> bool {
+    t == ROCK_CRACKED || rock_state(t).is_some()
+}
+
+pub fn is_wall(t: u8) -> bool {
+    (WALL..=WALL_CRUMBLING).contains(&t)
+}
 
 pub const TYPE_MASK: u8 = 0x3F;
 pub const SHADOW: u8 = 0x40;
@@ -86,17 +174,49 @@ const SEA_DEPTH: f64 = 30.0;
 const RAMP: usize = 110;
 const RIM_ROW: f64 = 40.0;
 const BOWL_DEPTH: f64 = 80.0;
-/// The ocean beyond each edge is endless, but pours in at most this many cells per tick per side: a
-/// breach floods steadily, and a crowd that scoops or walls fast enough can always stop it.
+/// The ocean beyond each edge is endless and presses on every opening at once: below sea level the edge
+/// columns are the ocean. Every open cell there is water, and it never runs empty: when it flows somewhere
+/// (on one tick in OCEAN_REFILL) it leaves water behind, so a breach gushes in through its whole height. The
+/// sea itself fills back up to sea level, OCEAN_INFLOW cells per tick per side.
+const OCEAN_REFILL: u64 = 3;
 const OCEAN_INFLOW: usize = 2;
 /// Checking whether a space is still connected to the sky gives up (and assumes it is) after this many
 /// cells, so one wall can never stall the server.
 const LIT_SEARCH_LIMIT: usize = 300_000;
 
-/// Spongestone starts this many cells below the surface, so a crowd finds it after a while of digging.
+/// Spongerock starts this many cells below the surface, so a crowd finds it after a while of digging.
 const SPONGE_DEPTH: usize = 15;
 /// Quartz starts this many cells below the surface.
 const QUARTZ_DEPTH: usize = 30;
+/// Extra clusters of spongerock and quartz in a band this many rows deep right below where each starts, so
+/// even a lone digger near the surface soon finds some.
+const SHALLOW_BAND: usize = 60;
+/// Amethyst starts this many cells below the surface, a little above the second rock layer.
+const AMETHYST_DEPTH: usize = 140;
+/// Coral reefs start this many cells below the surface, emberstone seams this many.
+const CORAL_DEPTH: usize = 60;
+const EMBER_DEPTH: usize = 90;
+/// On each turn (see grow_coral) one living coral cell in this many grows.
+const CORAL_CHANCE: u64 = 3;
+/// Coral reaches through air towards water at most this many cells away.
+const CORAL_REACH: usize = 4;
+/// Per tick, one steam cell in this many condenses back into water, one in STEAM_WEAR wears down a wall or
+/// rock next to it, and out in the open sky one in STEAM_ESCAPE drifts away.
+const STEAM_CONDENSE: u64 = 150;
+const STEAM_WEAR: u64 = 120;
+const STEAM_ESCAPE: u64 = 10;
+/// Magma falls every tick but flows only every MAGMA_SLOW ticks. Per tick, one magma cell in MAGMA_COOL hardens if it touches
+/// air (one in MAGMA_COOL_SKY out in the open sky; one in MAGMA_COOL_ENCLOSED
+/// inside a pool), and one in MAGMA_HEAT scorches a block next to it.
+const MAGMA_SLOW: i64 = 3;
+const MAGMA_COOL: u64 = 300;
+const MAGMA_COOL_SKY: u64 = 200;
+const MAGMA_COOL_ENCLOSED: u64 = 1000;
+const MAGMA_HEAT: u64 = 20;
+/// Rows of blending above and below each layer boundary (see LAYER_ROWS).
+const LAYER_BLEND: f64 = 30.0;
+/// The dirt crust is 2 or 3 cells deep.
+const DIRT_ROWS: usize = 2;
 /// Springs start this many cells below the surface.
 const SPRING_DEPTH: usize = 30;
 /// Evaporation: every EVAPORATE_EVERY ticks each column gets a turn, and the top water cell lying out in the
@@ -111,8 +231,9 @@ pub const SPRING_RATE: f64 = 1.0 / 3.0;
 /// well), so filling the shaft over it does not stop it; plugging its sides does.
 const SPRING_HEAD: i64 = 12;
 /// Cave-ins: a ceiling cell is unstable when the open space under it reaches at least this far to both
-/// sides, so rooms up to 2 * CAVE_SPAN cells wide hold, wider ones crack in the middle and collapse into
-/// an arch. Walls, rubble and rock under the ceiling count as support.
+/// sides (in the top layer; less deeper down, see CAVE_SPANS), so rooms up to 2 * CAVE_SPAN cells wide
+/// hold, wider ones crack in the middle and collapse into an arch. Walls, rubble and rock under the
+/// ceiling count as support.
 const CAVE_SPAN: i64 = 15;
 /// After digging, unstable ceilings crack after 3 to 10 s, and a cracked one falls 5 to 15 s later.
 const CAVE_CRACK_DELAY: (u64, u64) = (30, 70);
@@ -120,9 +241,14 @@ const CAVE_FALL_DELAY: (u64, u64) = (50, 100);
 
 const FILE_MAGIC: &[u8; 4] = b"MTW1";
 
-/// Open space for light and sight: air, water and rubble on its way down.
+/// Open space for light and sight: air, water, steam, magma and rubble on its way down.
 pub fn is_open(t: u8) -> bool {
-    t == AIR || t == WATER || t == RUBBLE_FALLING
+    t == AIR || t == WATER || t == RUBBLE_FALLING || t == STEAM || t == MAGMA
+}
+
+/// Air or steam: open space that players see and reach through.
+fn airy(t: u8) -> bool {
+    t == AIR || t == STEAM
 }
 
 pub struct World {
@@ -153,10 +279,15 @@ pub struct World {
     /// Open cells (air and water) connected to the sky or the ocean. Only these let light through: a
     /// tunnel sealed off with a wall goes dark, and nobody can dig inside it.
     lit: Vec<bool>,
-    /// Placed spongestone blocks, which soak up water.
+    /// Placed spongerock blocks, which soak up water.
     sponges: std::collections::BTreeSet<usize>,
     /// Open springs, which pour out water.
     springs: std::collections::BTreeSet<usize>,
+    /// Living coral, which grows towards water, and emberstone, which boils it.
+    corals: std::collections::BTreeSet<usize>,
+    embers: std::collections::BTreeSet<usize>,
+    /// The Upwelling going on, if any. Not saved: after a restart its veins have cooled (see load).
+    upwelling: Option<upwelling::Upwelling>,
     /// Ceiling cells to look at for a cave-in: (due tick, cell). Not saved: after a restart, ceilings are
     /// looked at again once someone digs near them.
     cave_checks: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize)>>,
@@ -177,6 +308,8 @@ impl World {
         let sea_level = surface[0] as usize;
         let sponges = (0..w * h).filter(|&i| cells[i] & TYPE_MASK == SPONGE).collect();
         let springs = (0..w * h).filter(|&i| cells[i] & TYPE_MASK == SPRING).collect();
+        let corals = (0..w * h).filter(|&i| cells[i] & TYPE_MASK == CORAL).collect();
+        let embers = (0..w * h).filter(|&i| cells[i] & TYPE_MASK == EMBER).collect();
         World {
             w,
             h,
@@ -197,6 +330,9 @@ impl World {
             lit: vec![false; w * h],
             sponges,
             springs,
+            corals,
+            embers,
+            upwelling: None,
             cave_checks: std::collections::BinaryHeap::new(),
             age: 0,
             spring_carry: 0.0,
@@ -206,26 +342,31 @@ impl World {
         }
     }
 
-    /// The ocean beyond the edges is endless: it pours into any open space at the island's edge columns
-    /// below sea level, at most OCEAN_INFLOW cells per tick per side. Water above sea level in the seas
-    /// runs off.
+    /// The ocean beyond the edges is endless (see OCEAN_REFILL): it pours into every opening in the island's
+    /// edge columns below sea level at once, and keeps the seas full. Water above sea level in the seas runs off.
     pub fn tend_ocean(&mut self) {
         if self.w < 2 * SHELF {
             return;
         }
-        // Fill the lowest open cells first: in the edge column at any depth (a breach through the island's
-        // side), and in the sea itself, so a drained sea fills back up to exactly sea level. In the sea
-        // only cells next to water count: a dry tunnel under the seabed stays dry until it is dug open.
-        let sea_bottom = self.sea_level + SEA_DEPTH as usize + 2;
         let w = self.w;
+        for x in [0, w - 1] {
+            for y in self.sea_level..self.h {
+                let i = y * w + x;
+                if airy(self.ty(i)) {
+                    self.set_type(i, WATER);
+                }
+            }
+        }
+        // A drained sea fills back up to exactly sea level, lowest cells first. Only cells next to water count:
+        // a dry tunnel under the seabed stays dry until it is dug open.
+        let sea_bottom = self.sea_level + SEA_DEPTH as usize + 2;
         for right in [false, true] {
             let col = |k: usize| if right { w - 1 - k } else { k };
             let mut inflow = OCEAN_INFLOW;
-            'fill: for y in (self.sea_level..self.h).rev() {
-                let width = if y < sea_bottom { SHELF } else { 1 };
-                for k in 0..width {
+            'fill: for y in (self.sea_level..sea_bottom.min(self.h)).rev() {
+                for k in 1..SHELF {
                     let i = y * self.w + col(k);
-                    if self.ty(i) == AIR && (k == 0 || self.neighbours(i).any(|n| self.ty(n) == WATER)) {
+                    if self.ty(i) == AIR && self.neighbours(i).any(|n| self.ty(n) == WATER) {
                         self.set_type(i, WATER);
                         inflow -= 1;
                         if inflow == 0 {
@@ -298,15 +439,17 @@ impl World {
             }
         }
 
-        // Spongestone veins, from SPONGE_DEPTH below the surface down; it only replaces rock.
+        // Spongerock veins, from SPONGE_DEPTH below the surface down; it only replaces rock.
+        // Some extra veins only in the shallow band (one per 80 columns).
         let veins = w * h * 99 / 312_500; // one per ~3150 cells
-        for _ in 0..veins {
+        for n in 0..veins + w / 80 {
             let cx = rng.below(w as u64) as i64;
             let top = surface[cx as usize] as usize + SPONGE_DEPTH;
             if top + 4 >= h {
                 continue;
             }
-            let cy = (top + rng.below((h - 4 - top) as u64) as usize) as i64;
+            let span = if n < veins { h - 4 - top } else { SHALLOW_BAND.min(h - 4 - top) };
+            let cy = (top + rng.below(span as u64) as usize) as i64;
             let r = 1.5 + rng.unit() * 3.05; // radius 1.5 to 4.55
             let ri = r.ceil() as i64;
             for dy in -ri..=ri {
@@ -328,17 +471,20 @@ impl World {
             }
         }
 
-        // Quartz: rarer than spongestone and a little deeper, and shaped differently: not a round blob but
+        // Quartz: rarer than spongerock and a little deeper, and shaped differently: not a round blob but
         // a crystal cluster, a plus-shaped core with 4 to 6 spikes of 2 to 4 cells sticking out in straight
         // or diagonal directions. It only replaces rock.
         const SPIKES: [(i64, i64); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
-        for _ in 0..w * h / 7000 {
+        // Some extra clusters only in the shallow band (one per 150 columns).
+        let clusters = w * h / 7000;
+        for n in 0..clusters + w / 150 {
             let cx = rng.below(w as u64) as i64;
             let top = surface[cx as usize] as usize + QUARTZ_DEPTH;
             if top + 6 >= h {
                 continue;
             }
-            let cy = (top + 3 + rng.below((h - 6 - top) as u64) as usize) as i64;
+            let span = if n < clusters { h - 6 - top } else { SHALLOW_BAND.min(h - 6 - top) };
+            let cy = (top + 3 + rng.below(span as u64) as usize) as i64;
             let mut put = |x: i64, y: i64| {
                 if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
                     return;
@@ -355,6 +501,60 @@ impl World {
                 let (dx, dy) = SPIKES[rng.below(8) as usize];
                 for k in 1..=2 + rng.below(3) as i64 {
                     put(cx + dx * k, cy + dy * k);
+                }
+            }
+        }
+
+        // Amethyst: rarer again, and shaped like a druse: 3 to 5 upright crystal columns side by side, each 2 to 5
+        // cells tall, so it looks nothing like quartz's spiky stars. It only replaces rock.
+        for _ in 0..w * h / 12_000 {
+            let cx = rng.below(w as u64) as i64;
+            let top = surface[cx as usize] as usize + AMETHYST_DEPTH;
+            if top + 10 >= h {
+                continue;
+            }
+            let base = (top + 6 + rng.below((h - 10 - top) as u64) as usize) as i64;
+            let columns = 3 + rng.below(3) as i64;
+            for k in 0..columns {
+                let x = cx - columns / 2 + k;
+                for j in 0..2 + rng.below(4) as i64 {
+                    let y = base - j;
+                    if x < 0 || x >= w as i64 || y < 0 {
+                        continue;
+                    }
+                    let i = y as usize * w + x as usize;
+                    if cells[i] == ROCK && y as usize >= surface[x as usize] as usize + AMETHYST_DEPTH {
+                        cells[i] = AMETHYST_ORE;
+                    }
+                }
+            }
+        }
+
+        // Emberstone: long thin seams running roughly sideways, 8 to 24 cells, now and then stepping up or
+        // down a row, unlike the blobs and clusters of the other materials. Never right next to water, so no
+        // pocket boils before anyone gets there.
+        for _ in 0..w * h / 40_000 {
+            let x0 = rng.below(w as u64) as usize;
+            let top = surface[x0] as usize + EMBER_DEPTH;
+            if top + 4 >= h {
+                continue;
+            }
+            let (mut x, mut y) = (x0 as i64, (top + rng.below((h - 4 - top) as u64) as usize) as i64);
+            let dir = if rng.next() & 1 == 0 { -1 } else { 1 };
+            for _ in 0..8 + rng.below(17) {
+                if x < 1 || x >= w as i64 - 1 || y < 1 || y >= h as i64 - 1 {
+                    break;
+                }
+                let i = y as usize * w + x as usize;
+                let dry = [i - 1, i + 1, i - w, i + w].iter().all(|&n| cells[n] != WATER);
+                if cells[i] == ROCK && dry && y as usize >= surface[x as usize] as usize + EMBER_DEPTH {
+                    cells[i] = EMBER;
+                }
+                x += dir;
+                match rng.below(6) {
+                    0 => y -= 1,
+                    1 => y += 1,
+                    _ => {}
                 }
             }
         }
@@ -385,6 +585,42 @@ impl World {
             if cells[i] == WATER && cells[i + w] == ROCK {
                 cells[i + w] = SPRING;
                 pocket_springs -= 1;
+            }
+        }
+
+        // Swellcoral reefs: on the floor of water pockets, a little tree of coral branching up into the water.
+        // Unlike the materials in the rock, it is found inside water: players drain a pocket to get at it.
+        let mut reefs = w * h / 50_000;
+        for _ in 0..400_000 {
+            if reefs == 0 {
+                break;
+            }
+            let x = rng.below(w as u64) as usize;
+            let top = surface[x] as usize + CORAL_DEPTH;
+            if top + 2 >= h {
+                continue;
+            }
+            let y = top + rng.below((h - 2 - top) as u64) as usize;
+            if cells[y * w + x] != WATER || cells[(y + 1) * w + x] != ROCK {
+                continue;
+            }
+            reefs -= 1;
+            // Each step up, every tip grows one cell, drifting to a side now and then; a tip may fork.
+            let mut tips = vec![(x as i64, y as i64)];
+            for _ in 0..3 + rng.below(5) {
+                let mut next = Vec::new();
+                for &(tx, ty) in &tips {
+                    if tx < 0 || tx >= w as i64 || ty < 0 || cells[ty as usize * w + tx as usize] != WATER {
+                        continue;
+                    }
+                    cells[ty as usize * w + tx as usize] = CORAL_ORE;
+                    let drift = [-1, 0, 0, 1][rng.below(4) as usize];
+                    next.push((tx + drift, ty - 1));
+                    if tips.len() + next.len() < 5 && rng.below(3) == 0 {
+                        next.push((tx + if drift > 0 { -1 } else { 1 }, ty - 1));
+                    }
+                }
+                tips = next;
             }
         }
 
@@ -429,6 +665,36 @@ impl World {
             let seabed = SEA_LEVEL + (SEA_DEPTH * t.powf(1.5) + 1.0).round() as usize;
             for y in SEA_LEVEL..seabed {
                 cells[y * w + x] = WATER;
+            }
+        }
+        // Rock layers: each rock cell gets its layer here, by depth, with patchy blends at the boundaries.
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if cells[i] != ROCK || y < surface[x] as usize {
+                    continue;
+                }
+                let depth = (y - surface[x] as usize) as f64;
+                let patch = 0.75 * noise::value(seed ^ 0x1A7E, x as f64 / 7.0, y as f64 / 5.0)
+                    + 0.25 * noise::unit(seed ^ 0x1A7F, x as i64, y as i64);
+                let mut k = 0;
+                while k + 1 < ROCK_LAYERS.len() {
+                    let start = ((k + 1) * LAYER_ROWS) as f64 - LAYER_BLEND;
+                    if patch >= ((depth - start) / (2.0 * LAYER_BLEND)).clamp(0.0, 1.0) {
+                        break;
+                    }
+                    k += 1;
+                }
+                cells[i] = ROCK_LAYERS[k];
+            }
+        }
+        // A crust of dirt on top, 2 or 3 cells deep.
+        for x in 0..w {
+            let rows = DIRT_ROWS + (noise::hash(seed ^ 0xD127, x as i64 / 3, 0) % 2) as usize;
+            for y in surface[x] as usize..(surface[x] as usize + rows).min(h) {
+                if cells[y * w + x] == ROCK {
+                    cells[y * w + x] = DIRT;
+                }
             }
         }
         for c in &mut cells[(h - 2) * w..] {
@@ -522,6 +788,14 @@ impl World {
         }
         if t == SPRING {
             self.springs.insert(i);
+        }
+        for (kind, set) in [(CORAL, &mut self.corals), (EMBER, &mut self.embers)] {
+            if c & TYPE_MASK == kind {
+                set.remove(&i);
+            }
+            if t == kind {
+                set.insert(i);
+            }
         }
         self.cells[i] = (c & VIS_MASK) | t;
         if c & VIS_MASK != 0 {
@@ -685,11 +959,16 @@ impl World {
     }
 
     fn lit_air(&self, i: usize) -> bool {
-        self.lit[i] && self.ty(i) == AIR
+        self.lit[i] && airy(self.ty(i))
     }
 
     fn touches_lit_air(&self, i: usize) -> bool {
         self.neighbours(i).any(|n| self.lit_air(n))
+    }
+
+    /// Is a wall next to this cell? Walls can be built on from there, even out of reach of open air.
+    pub fn touches_wall(&self, i: usize) -> bool {
+        self.neighbours(i).any(|n| is_wall(self.ty(n)))
     }
 
     /// Can a player reach this cell? Only visible cells touching lit air can be dug, scooped or built on:
@@ -775,8 +1054,15 @@ impl World {
                     continue;
                 }
                 let i = y * w + x;
-                seen[sy * size + sx] = match self.ty(i) {
-                    AIR => 2 * self.lit[i] as u8,
+                // Walls are always visible, and so is everything next to one: players see along a wall they
+                // built, even deep under water, and can build it on from there (see touches_wall).
+                let t = self.ty(i);
+                if is_wall(t) || self.touches_wall(i) {
+                    seen[sy * size + sx] = if t == WATER { 1 } else { 2 };
+                    continue;
+                }
+                seen[sy * size + sx] = match t {
+                    AIR | STEAM => 2 * self.lit[i] as u8,
                     WATER => (depth_at(x, y) <= WATER_SIGHT) as u8,
                     _ => {
                         let (xi, yi) = (x as i64, y as i64);
@@ -784,7 +1070,7 @@ impl World {
                         for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                             if let Some(n) = self.index_of(xi + dx, yi + dy) {
                                 match self.ty(n) {
-                                    AIR if self.lit[n] => lit = 2,
+                                    AIR | STEAM if self.lit[n] => lit = 2,
                                     WATER if lit == 0 && depth_at(n % w, n / w) < WATER_SIGHT => lit = 3,
                                     _ => {}
                                 }
@@ -820,7 +1106,7 @@ impl World {
         }
     }
 
-    /// Every placed spongestone block soaks up one neighbouring water cell.
+    /// Every placed spongerock block soaks up one neighbouring water cell.
     pub fn absorb(&mut self) {
         let sponges: Vec<usize> = self.sponges.iter().copied().collect();
         for i in sponges {
@@ -868,6 +1154,8 @@ impl World {
                         match self.cells[i] & TYPE_MASK {
                             WATER => self.move_water(x as i64, y as i64),
                             RUBBLE_FALLING => self.move_rubble(x as i64, y as i64),
+                            STEAM => self.move_steam(x as i64, y as i64),
+                            MAGMA => self.move_magma(x as i64, y as i64),
                             _ => {}
                         }
                     }
@@ -898,8 +1186,13 @@ impl World {
         }
 
         // Flow sideways towards a nearby drop. Without a drop, only spread when water above pushes,
-        // so a settled pool stops moving and its chunk can sleep.
-        let pushed = self.index_of(x, y - 1).is_some_and(|i| self.ty(i) == WATER);
+        // so a settled pool stops moving and its chunk can sleep. In the edge columns below sea level the
+        // endless ocean beyond always pushes.
+        let ocean = self.is_ocean(from);
+        if ocean && self.rng.below(OCEAN_REFILL) != 0 {
+            return self.wake(from);
+        }
+        let pushed = ocean || self.index_of(x, y - 1).is_some_and(|i| self.ty(i) == WATER);
         for d in [d0, -d0] {
             let mut reach = 0;
             let mut drop = false;
@@ -919,7 +1212,12 @@ impl World {
         // shafts fill up to the same level and trapped air bubbles get filled.
         // Every other tick only, so floods do not fill shafts in the blink of an eye. On a skipped turn the
         // chunk stays awake if there is somewhere to go, so the cell gets its turn next tick.
-        if !pushed {
+        if ocean {
+            // The ocean's weight: it pushes through the water it touches up to sea level.
+            if let Some(to) = self.air_through_water(x, y, self.sea_level as i64 + 1) {
+                self.move_to(from, to);
+            }
+        } else if !pushed {
             if let Some(to) = self.pressure_target(x, y) {
                 if (self.tick as i64 + x) & 1 == 0 {
                     self.move_to(from, to);
@@ -977,7 +1275,7 @@ impl World {
         let from = y as usize * self.w + x as usize;
         let ty_at = |w: &World, x: i64, y: i64| w.index_of(x, y).map(|i| w.ty(i));
         match ty_at(self, x, y + 1) {
-            Some(AIR) => {
+            Some(AIR) | Some(STEAM) => {
                 let mut ny = y + 1;
                 while ny - y < FALL_SPEED && ty_at(self, x, ny + 1) == Some(AIR) {
                     ny += 1;
@@ -1018,6 +1316,198 @@ impl World {
         self.set_type(from, displaced);
         self.stamp[to] = self.tick;
         self.stamp[from] = self.tick;
+    }
+
+    /// Steam rises through air and water (the water drops into its place), creeps sideways under a ceiling,
+    /// and now and then wears down a wall or rock next to it. Sooner or later it condenses back into water;
+    /// out in the open sky it drifts away.
+    fn move_steam(&mut self, x: i64, y: i64) {
+        let from = y as usize * self.w + x as usize;
+        if (y as usize) < self.surface[x as usize] as usize && self.rng.below(STEAM_ESCAPE) == 0 {
+            return self.set_type(from, AIR);
+        }
+        if self.rng.below(STEAM_CONDENSE) == 0 {
+            return self.set_type(from, WATER);
+        }
+        if self.rng.below(STEAM_WEAR) == 0 {
+            let sides: Vec<usize> = self.neighbours(from).collect();
+            let n = sides[self.rng.below(sides.len() as u64) as usize];
+            self.wear_by_steam(n);
+        }
+        let ty_at = |w: &World, x: i64, y: i64| w.index_of(x, y).map(|i| w.ty(i));
+        let loose = |t: Option<u8>| t == Some(AIR) || t == Some(WATER);
+        let w = self.w;
+        let at = |x: i64, y: i64| y as usize * w + x as usize;
+        if loose(ty_at(self, x, y - 1)) {
+            return self.swap_steam(from, at(x, y - 1));
+        }
+        let d0 = if self.rng.next() & 1 == 0 { -1 } else { 1 };
+        for d in [d0, -d0] {
+            if loose(ty_at(self, x + d, y)) && loose(ty_at(self, x + d, y - 1)) {
+                return self.swap_steam(from, at(x + d, y - 1));
+            }
+        }
+        if ty_at(self, x + d0, y) == Some(AIR) && self.rng.next() & 1 == 0 {
+            return self.swap_steam(from, at(x + d0, y));
+        }
+        // Stuck under a ceiling: keep the chunk awake, so it goes on wearing and condensing.
+        self.wake(from);
+    }
+
+    /// Move steam from `from` to `to`; whatever was at `to` (air or water) takes its place.
+    fn swap_steam(&mut self, from: usize, to: usize) {
+        let displaced = self.ty(to);
+        self.set_type(to, STEAM);
+        self.set_type(from, displaced);
+        self.stamp[to] = self.tick;
+        self.stamp[from] = self.tick;
+    }
+
+    /// Steam wears down a wall by one stage, or rock by one hit; what breaks falls as rubble. Crystals,
+    /// coral and other materials resist it.
+    fn wear_by_steam(&mut self, i: usize) {
+        let t = self.ty(i);
+        let to = match t {
+            WALL => WALL_CRACKED,
+            WALL_CRACKED => WALL_CRUMBLING,
+            WALL_CRUMBLING | ROCK_CRACKED | LAVA_ROCK_CHIPPED => RUBBLE_FALLING,
+            LAVA_ROCK => LAVA_ROCK_CHIPPED,
+            _ => match rock_state(t) {
+                Some((kind, left)) if left > 1 => worn(kind, left - 1),
+                Some(_) => RUBBLE_FALLING,
+                None => return,
+            },
+        };
+        self.set_type(i, to);
+    }
+
+    /// Magma: water next to it turns it into lava rock at once (and boils into steam). Otherwise it cools
+    /// slowly, scorches the blocks around it, and every MAGMA_SLOW ticks oozes down, down a slope, or now and
+    /// then sideways.
+    fn move_magma(&mut self, x: i64, y: i64) {
+        let from = y as usize * self.w + x as usize;
+        let wet: Vec<usize> = self.neighbours(from).filter(|&n| self.ty(n) == WATER).collect();
+        if !wet.is_empty() {
+            for n in wet {
+                self.set_type(n, STEAM);
+            }
+            return self.set_type(from, LAVA_ROCK);
+        }
+        // Magma still falling (a lava bomb) does not harden in mid-air.
+        let falling = self.index_of(x, y + 1).is_some_and(|n| airy(self.ty(n)));
+        let cool = if falling {
+            u64::MAX
+        } else if (y as usize) < self.surface[x as usize] as usize {
+            MAGMA_COOL_SKY
+        } else if self.neighbours(from).any(|n| airy(self.ty(n))) {
+            MAGMA_COOL
+        } else {
+            MAGMA_COOL_ENCLOSED
+        };
+        if self.rng.below(cool) == 0 {
+            return self.set_type(from, LAVA_ROCK);
+        }
+        if self.rng.below(MAGMA_HEAT) == 0 {
+            let sides: Vec<usize> = self.neighbours(from).collect();
+            let n = sides[self.rng.below(sides.len() as u64) as usize];
+            self.scorch(n);
+        }
+        let open = |w: &World, x: i64, y: i64| w.index_of(x, y).is_some_and(|i| airy(w.ty(i)));
+        let w = self.w;
+        let at = |x: i64, y: i64| y as usize * w + x as usize;
+        // It falls freely; only flowing is slow.
+        if open(self, x, y + 1) {
+            return self.swap_magma(from, at(x, y + 1));
+        }
+        if (self.tick as i64 + x) % MAGMA_SLOW != 0 {
+            return self.wake(from);
+        }
+        let d0 = if self.rng.next() & 1 == 0 { -1 } else { 1 };
+        for d in [d0, -d0] {
+            if open(self, x + d, y) && open(self, x + d, y + 1) {
+                return self.swap_magma(from, at(x + d, y + 1));
+            }
+        }
+        if open(self, x + d0, y) && self.rng.below(3) == 0 {
+            return self.swap_magma(from, at(x + d0, y));
+        }
+        self.wake(from);
+    }
+
+    /// Move magma from `from` to `to`; the air or steam at `to` takes its place.
+    fn swap_magma(&mut self, from: usize, to: usize) {
+        let displaced = self.ty(to);
+        self.set_type(to, MAGMA);
+        self.set_type(from, displaced);
+        self.stamp[to] = self.tick;
+        self.stamp[from] = self.tick;
+    }
+
+    /// Heat from magma or a vein: walls crack a stage at a time and then give way, rubble melts into magma,
+    /// spongerock and coral burn away. Natural rock and crystals withstand it.
+    fn scorch(&mut self, i: usize) {
+        let to = match self.ty(i) {
+            WALL => WALL_CRACKED,
+            WALL_CRACKED => WALL_CRUMBLING,
+            WALL_CRUMBLING | SPONGE | CORAL => AIR,
+            RUBBLE | RUBBLE_FALLING => MAGMA,
+            _ => return,
+        };
+        self.set_type(i, to);
+    }
+
+    /// Living coral grows: one cell in CORAL_CHANCE turns a water cell next to it into coral, or else grows
+    /// one cell through air towards water at most CORAL_REACH cells away. Coral far from water rests.
+    pub fn grow_coral(&mut self) {
+        let corals: Vec<usize> = self.corals.iter().copied().collect();
+        for i in corals {
+            if self.rng.below(CORAL_CHANCE) != 0 {
+                continue;
+            }
+            let wet = self.neighbours(i).find(|&n| self.ty(n) == WATER);
+            let into = if wet.is_some() { wet } else { self.air_towards_water(i) };
+            if let Some(n) = into {
+                self.set_type(n, CORAL);
+            }
+        }
+    }
+
+    /// The air cell next to `start` on the shortest way through air to water at most CORAL_REACH away.
+    fn air_towards_water(&mut self, start: usize) -> Option<usize> {
+        let first: Vec<usize> = self.neighbours(start).filter(|&n| self.ty(n) == AIR).collect();
+        if first.is_empty() {
+            return None;
+        }
+        let round = self.next_visit_round();
+        self.visit[start] = round;
+        let mut queue = std::collections::VecDeque::new();
+        for n in first {
+            self.visit[n] = round;
+            queue.push_back((n, n, 1));
+        }
+        while let Some((c, step, d)) = queue.pop_front() {
+            let next: Vec<usize> = self.neighbours(c).filter(|&n| self.visit[n] != round).collect();
+            for n in next {
+                self.visit[n] = round;
+                match self.ty(n) {
+                    WATER => return Some(step),
+                    AIR if d < CORAL_REACH => queue.push_back((n, step, d + 1)),
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Every emberstone boils one water cell next to it into steam.
+    pub fn boil(&mut self) {
+        let embers: Vec<usize> = self.embers.iter().copied().collect();
+        for i in embers {
+            let wet = self.neighbours(i).find(|&n| self.ty(n) == WATER);
+            if let Some(n) = wet {
+                self.set_type(n, STEAM);
+            }
+        }
     }
 
     /// Rain water lying above the ground slowly dries up: the top water cell of each column, if it lies above
@@ -1062,7 +1552,7 @@ impl World {
         let (x, y) = ((i % self.w) as i64, (i / self.w) as i64);
         for dx in -(CAVE_SPAN + 1)..=CAVE_SPAN + 1 {
             if let Some(c) = self.index_of(x + dx, y - 1) {
-                if self.ty(c) == ROCK || self.ty(c) == ROCK_CRACKED {
+                if is_rock(self.ty(c)) {
                     let due = self.age + CAVE_CRACK_DELAY.0 + self.rng.below(CAVE_CRACK_DELAY.1);
                     self.cave_checks.push(std::cmp::Reverse((due, c)));
                 }
@@ -1081,8 +1571,9 @@ impl World {
         if !open_below(x) {
             return false;
         }
-        let reach = |d: i64| (1..=CAVE_SPAN).take_while(|&k| open_below(x + d * k)).count() as i64;
-        reach(-1).min(reach(1)) >= CAVE_SPAN
+        let span = CAVE_SPANS[layer(y as usize - self.surface[x as usize] as usize)];
+        let reach = |d: i64| (1..=span).take_while(|&k| open_below(x + d * k)).count() as i64;
+        reach(-1).min(reach(1)) >= span
     }
 
     /// Cave-ins due this tick: unstable ceiling rock cracks first, and cracked rock that is still unstable
@@ -1096,13 +1587,14 @@ impl World {
             }
             self.cave_checks.pop();
             let t = self.ty(i);
-            if (t != ROCK && t != ROCK_CRACKED) || !self.ceiling_unstable(i) {
+            if !is_rock(t) || !self.ceiling_unstable(i) {
                 continue;
             }
             if t == ROCK_CRACKED {
                 self.set_type(i, RUBBLE_FALLING);
                 continue;
             }
+            // Worn rock cracks like fresh rock.
             self.set_type(i, ROCK_CRACKED);
             let due = self.age + CAVE_FALL_DELAY.0 + self.rng.below(CAVE_FALL_DELAY.1);
             self.cave_checks.push(std::cmp::Reverse((due, i)));
@@ -1115,8 +1607,17 @@ impl World {
 
     fn move_to(&mut self, from: usize, to: usize) {
         self.set_type(to, WATER);
-        self.set_type(from, AIR);
+        // The ocean never runs empty.
+        if !self.is_ocean(from) {
+            self.set_type(from, AIR);
+        }
         self.stamp[to] = self.tick;
+    }
+
+    /// The edge columns below sea level are the endless ocean (see OCEAN_REFILL).
+    fn is_ocean(&self, i: usize) -> bool {
+        let x = i % self.w;
+        (x == 0 || x == self.w - 1) && i / self.w >= self.sea_level
     }
 
     /// Visible contents of one chunk, run-length encoded as (value, count) byte pairs.
@@ -1193,7 +1694,14 @@ impl World {
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
-        let mut world = World::from_parts(w, h, seed, surface, buf[cells_at..].to_vec());
+        let mut cells = buf[cells_at..].to_vec();
+        // An Upwelling is not saved: veins still molten cool at once.
+        for c in &mut cells {
+            if *c & TYPE_MASK == MOLTEN {
+                *c = (*c & VIS_MASK) | LAVA_ROCK;
+            }
+        }
+        let mut world = World::from_parts(w, h, seed, surface, cells);
         // Water may have been moving when the world was saved.
         world.wake_all();
         world.relight_all();
@@ -1227,6 +1735,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn count(world: &World, t: u8) -> usize {
         (0..world.w * world.h).filter(|&i| world.ty(i) == t).count()
@@ -1280,6 +1789,70 @@ mod tests {
         let under = (30..35).find(|&x| world.ty(world.idx(x, 39)) == RUBBLE).unwrap();
         world.dig(world.idx(under, 40));
         assert_eq!(world.ty(world.idx(under, 39)), RUBBLE_FALLING);
+    }
+
+    #[test]
+    fn coral_grows_towards_water_and_turns_it_into_coral() {
+        let mut world = flat(64, 64);
+        // A room 10 wide at rows 20-24: water in its right part, coral planted on the floor at the left.
+        for y in 20..25 {
+            for x in 20..30 {
+                world.dig(world.idx(x, y));
+            }
+        }
+        for y in 22..25 {
+            for x in 26..30 {
+                world.set_type(world.idx(x, y), WATER);
+            }
+        }
+        world.set_type(world.idx(22, 24), CORAL);
+        let water = count(&world, WATER);
+        for _ in 0..200 {
+            world.grow_coral();
+            world.step_water();
+        }
+        assert!(count(&world, WATER) < water / 2, "coral should eat most of the water");
+        // It grew towards the water, not everywhere: the far corner of the room stays open.
+        assert_eq!(world.ty(world.idx(20, 20)), AIR);
+        // Without water nearby it rests.
+        for i in 0..world.w * world.h {
+            if world.ty(i) == WATER {
+                world.set_type(i, AIR);
+            }
+        }
+        let corals = count(&world, CORAL);
+        for _ in 0..50 {
+            world.grow_coral();
+        }
+        assert_eq!(count(&world, CORAL), corals);
+    }
+
+    #[test]
+    fn emberstone_boils_water_and_steam_wears_down_the_ceiling() {
+        let mut world = flat(64, 64);
+        // A closed room at rows 20-24 with a wall in its ceiling, water on its floor, emberstone beneath.
+        for y in 20..25 {
+            for x in 20..30 {
+                world.dig(world.idx(x, y));
+            }
+        }
+        for x in 20..30 {
+            world.set_type(world.idx(x, 24), WATER);
+            world.set_type(world.idx(x, 25), EMBER);
+        }
+        world.set_type(world.idx(25, 19), WALL);
+        let mut steam_seen = 0;
+        for t in 0..3000 {
+            if t % 10 == 0 {
+                world.boil();
+            }
+            world.step_water();
+            steam_seen = steam_seen.max(count(&world, STEAM));
+        }
+        assert!(steam_seen > 0, "water next to emberstone boils");
+        assert_ne!(world.ty(world.idx(25, 19)), WALL, "steam under the ceiling cracks the wall");
+        let worn = (20..30).filter(|&x| world.ty(world.idx(x, 19)) != ROCK).count();
+        assert!(worn > 1, "steam wears the rock of the ceiling");
     }
 
     #[test]
@@ -1403,6 +1976,51 @@ mod tests {
     }
 
     #[test]
+    fn deeper_rock_is_harder_and_holds_smaller_rooms() {
+        let hits: Vec<u8> = ROCK_LAYERS.iter().map(|&t| rock_state(t).unwrap().1).collect();
+        assert_eq!(hits, [1, 3, 5, 8, 12]);
+        assert_eq!(rock_state(DIRT), Some((0, 1)));
+        assert_eq!(rock_state(SPONGE_ORE), None);
+        // Every worn state maps back to its own kind and hits left, and the types do not overlap.
+        let mut seen = HashSet::new();
+        for (k, &hits) in KIND_HITS.iter().enumerate() {
+            for left in 1..hits {
+                assert_eq!(rock_state(worn(k, left)), Some((k, left)));
+                assert!(seen.insert(worn(k, left)));
+            }
+        }
+        assert!(seen.iter().all(|&t| t >= WORN_BASE && t < 64 && !ROCK_KINDS.contains(&t)));
+        assert!(CAVE_SPANS.windows(2).all(|w| w[0] > w[1]));
+        assert_eq!(CAVE_SPANS[0], CAVE_SPAN);
+    }
+
+    #[test]
+    fn walls_see_and_reach_into_deep_water() {
+        let mut world = flat(64, 64);
+        // A flooded shaft, far deeper than players can see into water.
+        for y in 8..40 {
+            world.dig(world.idx(32, y));
+            if y >= 12 {
+                world.set_type(world.idx(32, y), WATER);
+            }
+        }
+        world.update_sight();
+        assert!(!world.is_revealed(world.idx(32, 30)), "deep water is dark");
+        // A wall at the water's surface, then one under it, and one more: each next to the last.
+        for y in [12, 13, 14] {
+            let i = world.idx(32, y);
+            assert!(world.is_revealed(i) && (world.reachable(i) || world.touches_wall(i)), "row {y}");
+            world.set_type(i, WALL);
+            world.update_sight();
+        }
+        assert!(world.is_revealed(world.idx(32, 15)), "the water under the wall is visible");
+        assert!(world.touches_wall(world.idx(32, 15)));
+        // The rock beside the wall shows too, but it is no place to build.
+        assert!(world.is_revealed(world.idx(31, 14)));
+        assert_eq!(world.ty(world.idx(31, 14)), ROCK);
+    }
+
+    #[test]
     fn falling_rubble_does_not_darken_the_shaft_below() {
         let mut world = flat(64, 64);
         for y in 8..40 {
@@ -1420,20 +2038,31 @@ mod tests {
     }
 
     #[test]
-    fn generated_world_has_water_and_spongestone_but_hides_them() {
+    fn generated_world_has_water_and_spongerock_but_hides_them() {
         let world = World::generate(1024, 512, 42);
         let cells = (world.w * world.h) as f64;
         let water = count(&world, WATER) as f64 / cells;
         let ore: Vec<usize> = (0..world.w * world.h).filter(|&i| world.ty(i) == SPONGE_ORE).collect();
-        println!("water {:.1}%, spongestone cells {}", water * 100.0, ore.len());
+        println!("water {:.1}%, spongerock cells {}", water * 100.0, ore.len());
         for &i in &ore {
             let (x, y) = (i % world.w, i / world.w);
-            assert!(y >= world.surface[x] as usize + SPONGE_DEPTH, "spongestone too shallow at ({x}, {y})");
+            assert!(y >= world.surface[x] as usize + SPONGE_DEPTH, "spongerock too shallow at ({x}, {y})");
         }
         assert!(water > 0.005 && water < 0.10);
         assert!(ore.len() > 100);
         let quartz: Vec<usize> = (0..world.w * world.h).filter(|&i| world.ty(i) == QUARTZ_ORE).collect();
-        println!("quartz cells {}", quartz.len());
+        println!("quartz cells {}, amethyst cells {}", quartz.len(), count(&world, AMETHYST_ORE));
+        assert!(count(&world, AMETHYST_ORE) > 20);
+        println!("coral cells {}, emberstone cells {}", count(&world, CORAL_ORE), count(&world, EMBER));
+        assert!(count(&world, CORAL_ORE) > 20 && count(&world, EMBER) > 100);
+        // Layers blend: around 160 m both the first and the second layer's rock turn up; much deeper only the
+        // deeper one does.
+        let at = |depth: usize, t: u8| {
+            (100..world.w - 100).filter(|&x| world.ty(world.idx(x, world.surface[x] as usize + depth)) == t).count()
+        };
+        assert!(at(LAYER_ROWS, ROCK) > 50 && at(LAYER_ROWS, ROCK_LAYERS[1]) > 50, "no blend at the boundary");
+        assert_eq!(at(LAYER_ROWS + 40, ROCK), 0, "top layer rock far below its boundary");
+        assert!(at(0, DIRT) + at(1, DIRT) > 1000, "a crust of dirt on top");
         println!("damp rock {}, pocket springs {}", count(&world, SPRING_ROCK), count(&world, SPRING));
         assert!(count(&world, SPRING_ROCK) > 5 && count(&world, SPRING) > 0);
         assert!(quartz.len() > 50);
@@ -1497,9 +2126,9 @@ mod tests {
         }
     }
 
-    /// A tunnel dug through the island's edge below sea level lets the ocean in, at a limited rate.
+    /// A tunnel dug through the island's edge below sea level lets the ocean in, through every opening at once.
     #[test]
-    fn a_breach_lets_the_ocean_in_slowly() {
+    fn a_breach_lets_the_ocean_in_through_every_opening() {
         let mut world = World::generate(1024, 512, 3);
         // A tunnel from the edge (under the seabed) far inland, 40 rows below sea level.
         let y = SEA_LEVEL + 40;
@@ -1512,8 +2141,39 @@ mod tests {
             world.step_water();
         }
         let poured = count(&world, WATER) - before;
-        assert!(poured > 0, "the ocean should pour in");
-        assert!(poured <= 100 * OCEAN_INFLOW * 2, "{poured} cells in 10 seconds is too fast to fix");
+        assert!(poured > 20, "the ocean should pour in, only {poured} cells");
+        // A second tunnel lower down: water comes in through both, not only the lowest.
+        let low = y + 30;
+        for x in 0..50 {
+            world.dig(world.idx(x, low));
+        }
+        for _ in 0..30 {
+            world.tend_ocean();
+            world.step_water();
+        }
+        let wet = |world: &World, row: usize| (0..50).filter(|&x| world.ty(world.idx(x, row)) == WATER).count();
+        assert!(wet(&world, low) > 5, "the lower breach pours too");
+        assert!(wet(&world, y) > 5, "and the upper one still has water");
+    }
+
+    /// A big cave dug open at the island's edge fills up to sea level through its whole opening, in seconds.
+    #[test]
+    fn the_ocean_gushes_into_a_big_edge_cave() {
+        let mut world = World::generate(1024, 512, 3);
+        for y in SEA_LEVEL..SEA_LEVEL + 80 {
+            for x in 0..60 {
+                world.dig(world.idx(x, y));
+            }
+        }
+        for _ in 0..300 {
+            world.tend_ocean();
+            world.step_water();
+        }
+        let water = (SEA_LEVEL + 1..SEA_LEVEL + 80)
+            .flat_map(|y| (0..60).map(move |x| (x, y)))
+            .filter(|&(x, y)| world.ty(world.idx(x, y)) == WATER)
+            .count();
+        assert!(water > 79 * 60 * 9 / 10, "only {water} of {} cells under sea level filled in 30 s", 79 * 60);
     }
 
     #[test]
@@ -1892,7 +2552,7 @@ mod more_tests {
     }
 
     #[test]
-    fn placed_spongestone_soaks_up_water() {
+    fn placed_spongerock_soaks_up_water() {
         let mut world = World::generate(1024, 256, 2);
         let mid = world.w / 2;
         let y = world.surface[mid] as usize + 20;

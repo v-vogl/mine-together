@@ -5,7 +5,7 @@
   --muted: #b3aa9c;
   --accent: #ffd34d;
   --danger: #ff6b6b;
-  --rock: #8a6a48;
+  --rock: #99856b;
   --water: #2f6fe0;
   --wall: #8e8d93;
 }
@@ -65,13 +65,89 @@ body {
   color: var(--muted);
 }
 
-#record {
-  color: var(--accent);
-}
-
 #rain {
   color: #8fc1ff;
   font-weight: 600;
+}
+
+#upwelling {
+  color: #d4211b;
+  font-weight: 700;
+  text-shadow: 0 0 6px rgba(255, 40, 20, 0.45);
+}
+
+#upwelling[hidden] {
+  display: none;
+}
+
+#leaders-button,
+#menu-button {
+  pointer-events: auto;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  font-size: 16px;
+}
+
+/* Small and out of the way: opened from the trophy, under the top bar. */
+#leaders {
+  position: fixed;
+  top: 48px;
+  left: 8px;
+  width: min(260px, calc(100% - 16px));
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+#leaders[hidden] {
+  display: none;
+}
+
+#leaders ol {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+#leaders li,
+#leaders-me {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+#leaders li .n,
+#leaders-me .n {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+#leaders .rank {
+  width: 22px;
+  color: var(--muted);
+  text-align: right;
+}
+
+#leaders .me {
+  color: var(--accent);
+}
+
+.leaders-foot {
+  margin-top: 6px;
+  font-size: 11px;
+  text-align: right;
+}
+
+#leaders-me {
+  color: var(--accent);
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
 }
 
 #cell-info {
@@ -226,7 +302,7 @@ button {
   color: var(--danger);
 }
 
-/* Between digging, what you collected (rock, water, spongestone) and what you build from rock. */
+/* Between digging, what you collected (rock, water, spongerock) and what you build from rock. */
 .divider {
   width: 1px;
   align-self: stretch;
@@ -251,6 +327,28 @@ button {
   background: var(--rock);
 }
 
+.dirt-swatch {
+  background: radial-gradient(circle at 30% 30%, #8e6a46 15%, transparent 16%),
+    radial-gradient(circle at 70% 70%, #5a3d24 15%, transparent 16%), #76512f;
+}
+
+.granite-swatch {
+  background: radial-gradient(circle at 25% 35%, #222 10%, transparent 11%),
+    radial-gradient(circle at 70% 60%, #eee 10%, transparent 11%), #9e807a;
+}
+
+.slate-swatch {
+  background: repeating-linear-gradient(0deg, #4c5464 0 3px, #3e4553 3px 6px);
+}
+
+.basalt-swatch {
+  background: repeating-linear-gradient(90deg, #303035 0 5px, #1c1c20 5px 6px);
+}
+
+.darkstone-swatch {
+  background: linear-gradient(160deg, transparent 45%, #a02a1c 45% 55%, transparent 55%), #3c1a24;
+}
+
 .water-swatch {
   background: var(--water);
 }
@@ -264,6 +362,29 @@ button {
   background: radial-gradient(circle at 30% 30%, #9e9282 22%, transparent 24%),
     radial-gradient(circle at 72% 40%, #847a6c 20%, transparent 22%),
     radial-gradient(circle at 45% 75%, #a89c8a 22%, transparent 24%), #3a352f;
+}
+
+.lava-swatch {
+  background: radial-gradient(circle at 30% 30%, #17141a 0 10%, transparent 11%),
+    radial-gradient(circle at 70% 60%, #17141a 0 12%, transparent 13%), #3d383b;
+}
+
+.opal-swatch {
+  background: radial-gradient(circle at 40% 40%, #ffe08a 0 15%, transparent 30%),
+    linear-gradient(135deg, #ff5a2a, #ffb13b 40%, #57d6a0 70%, #3a7bff);
+}
+
+.coral-swatch {
+  background: radial-gradient(circle at 30% 35%, #ffd0b8 0 12%, transparent 13%),
+    radial-gradient(circle at 70% 65%, #ffd0b8 0 12%, transparent 13%), #e8705f;
+}
+
+.ember-swatch {
+  background: linear-gradient(120deg, #1d1514 0 40%, #ff8a2a 40% 48%, #1d1514 48% 70%, #e0571c 70% 75%, #1d1514 75%);
+}
+
+.amethyst-swatch {
+  background: linear-gradient(90deg, #6d3fa8 0 25%, #b98be8 25% 40%, #8452c4 40% 70%, #d6b8f5 70% 80%, #7446b4 80%);
 }
 
 .quartz-swatch {
@@ -280,8 +401,9 @@ button {
 
 #shop-button[hidden],
 #shop[hidden],
-.offer[hidden],
-#quartz-count[hidden] {
+#menu[hidden],
+#code-error[hidden],
+.offer[hidden] {
   display: none;
 }
 
@@ -298,6 +420,49 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+#menu {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(400px, calc(100% - 32px));
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  z-index: 10;
+}
+
+.code-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.code-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  color: inherit;
+  font: 13px ui-monospace, Consolas, monospace;
+}
+
+.code-row .buy {
+  min-width: 64px;
+}
+
+.code-error {
+  margin-top: 4px;
+  color: #ff7b7b;
+  font-size: 12px;
 }
 
 .shop-head {
@@ -350,18 +515,6 @@ button {
   background: var(--wall);
 }
 
-#inventory {
-  display: flex;
-  gap: 10px;
-  padding: 0 6px;
-}
-
-#inventory > span {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
 #toast {
   position: fixed;
   left: 50%;
@@ -380,6 +533,33 @@ button {
 #toast.show {
   opacity: 1;
   transition: none;
+}
+
+/* First visit only: points new players at the one thing to do, until their first dig. */
+#hint {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--accent);
+  font-size: 16px;
+  font-weight: 600;
+  pointer-events: none;
+  animation: hint-bob 1.6s ease-in-out infinite;
+}
+
+#hint[hidden] {
+  display: none;
+}
+
+@keyframes hint-bob {
+  50% {
+    transform: translate(-50%, -6px);
+  }
 }
 
 #notices {

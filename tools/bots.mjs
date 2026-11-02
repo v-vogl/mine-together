@@ -1,11 +1,14 @@
 // Load test and playtest helpers: simulated players with different roles.
 //
-//   node tools/bots.mjs [bots=100] [seconds=60] [server=ws://localhost:8080] [--roles=digger:6,explorer:2,...]
+//   node tools/bots.mjs [bots=100] [seconds=60] [server=ws://localhost:8080] [--roles=digger:6,explorer:2,...] [--key=KEY]
+//
+// Against a server on another machine, all bots share one internet address and would be limited like three
+// players; --key=KEY (the server's dev key) lifts that for load tests. Locally no key is needed.
 //
 // Roles (default mix in DEFAULT_ROLES; --roles gives weights, e.g. --roles=flooder:1,builder:1):
 //   digger    digs down near the crater and follows its own dig
 //   explorer  digs anywhere in the bowl, wandering to a new spot now and then
-//   builder   defends: repairs cracked walls, walls off spreading water, places spongestone next to water,
+//   builder   defends: repairs cracked walls, walls off spreading water, places spongerock next to water,
 //             and digs for rock otherwise
 //   capper    griefer: builds walls over the tops of shafts and tunnels to seal them off
 //   flooder   griefer: digs a shaft by a shore, tunnels inland below sea level until it meets someone
@@ -23,6 +26,8 @@ if (!Number.isFinite(BOTS) || !Number.isFinite(SECONDS) || !/^wss?:\/\//.test(SE
 }
 const DEFAULT_ROLES = { digger: 6, explorer: 2, builder: 1, capper: 0.5, flooder: 0.5 };
 const rolesArg = process.argv.find((a) => a.startsWith("--roles="));
+const keyArg = process.argv.find((a) => a.startsWith("--key="));
+const BOT_KEY = keyArg ? `&bot=${encodeURIComponent(keyArg.slice(6))}` : "";
 const ROLES = rolesArg
   ? Object.fromEntries(rolesArg.slice(8).split(",").map((r) => { const [n, w] = r.split(":"); return [n, Number(w ?? 1)]; }))
   : DEFAULT_ROLES;
@@ -31,10 +36,11 @@ const CHUNK = 64;
 const AIR = 0, ROCK = 1, WATER = 2, WALL = 3, WALL_CRACKED = 4, WALL_CRUMBLING = 5, SPONGE_ORE = 6, QUARTZ_ORE = 11;
 const SPRING_ROCK = 12, ROCK_CRACKED = 14;
 // Plain rock as far as digging goes (damp rock opens a spring, which is the point of a playtest).
-const rocky = (t) => t === ROCK || t === SPRING_ROCK || t === ROCK_CRACKED;
+const rocky = (t) => t === ROCK || t === SPRING_ROCK || t === ROCK_CRACKED || (t >= 26 && t <= 29) || t === 31 ||
+  (t >= 32 && t <= 55);
 const REVEALED = 0x80;
 const ACT_DIG = 0, ACT_WALL = 1, ACT_PLACE = 2;
-const WALL_COST = 3;
+const WALL_COST = 2;
 const WALLS_UNLOCK_COST = 10;
 const run = Date.now().toString(36);
 const NEIGHBOURS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
@@ -58,7 +64,7 @@ function bot(n) {
   roleStats[role] ??= { bots: 0, ok: 0, walls: 0, sponges: 0, repairs: 0, breaches: 0 };
   const mine = roleStats[role];
   mine.bots++;
-  const ws = new WebSocket(`${SERVER}/ws?token=bot-${run}-${n}`);
+  const ws = new WebSocket(`${SERVER}/ws?token=bot-${run}-${n}${BOT_KEY}`);
   ws.binaryType = "arraybuffer";
   const chunks = new Map();
   let world = null, player = null, readyAt = 0, last = null, subscribedKey = "";
@@ -125,7 +131,7 @@ function bot(n) {
   // ---- Roles -------------------------------------------------------------------------------------
 
   function digger() {
-    const ore = sample(30, 30, 60, (x, y) => type(x, y) === SPONGE_ORE || type(x, y) === QUARTZ_ORE);
+    const ore = sample(30, 30, 60, (x, y) => type(x, y) === SPONGE_ORE || type(x, y) === QUARTZ_ORE || type(x, y) === 30);
     if (ore.length) return dig(ore[0]);
     // Rain water on the floor of the pit blocks the rock under it, so scoop it out too.
     const c = deepest(sample(30, 30, 80, (x, y) => rocky(type(x, y)) || (type(x, y) === WATER && underground(x, y))));
@@ -151,7 +157,7 @@ function bot(n) {
 
   function builder() {
     // 1. Repair cracked walls.
-    if (player.walls && player.rock >= 1) {
+    if (player.walls) {
       const cracked = sample(30, 30, 120, (x, y) => type(x, y) === WALL_CRACKED || type(x, y) === WALL_CRUMBLING)[0];
       if (cracked) return mine.repairs++, { kind: ACT_WALL, x: cracked[0], y: cracked[1] };
     }
@@ -164,7 +170,7 @@ function bot(n) {
       if (gaps.length && player.sponge > 0) return mine.sponges++, { kind: ACT_PLACE, x: gaps[0][0], y: gaps[0][1], arg: 0 };
       if (gaps.length && player.walls && player.rock >= WALL_COST) return mine.walls++, { kind: ACT_WALL, x: gaps[0][0], y: gaps[0][1] };
     }
-    // 3. Otherwise dig for rock and spongestone.
+    // 3. Otherwise dig for rock and spongerock.
     return explorer();
   }
 
@@ -305,11 +311,13 @@ function bot(n) {
       case 4: {
         const result = u8(), left = u32();
         u32();
-        player = { rock: u32(), water: u32(), sponge: u32(), quartz: u32(), pickaxe: u8(), walls: (u8() & 1) !== 0 };
+        player = { rock: u32(), water: u32(), sponge: u32(), quartz: u32(), pickaxe: u8(), walls: (u8() & 1) !== 0,
+          amethyst: u32(), strike: u8() };
         // Spend on upgrades like a player would: walls for the roles that build, pickaxe levels for everyone.
         const builds = role === "builder" || role === "capper";
         if (builds && !player.walls && player.rock >= WALLS_UNLOCK_COST) ws.send(new Uint8Array([3, 0]));
-        else if (player.pickaxe < 5 && player.quartz > player.pickaxe) ws.send(new Uint8Array([3, 1]));
+        else if (player.pickaxe < 5 && player.quartz >= 2 ** (player.pickaxe + 1) - 1) ws.send(new Uint8Array([3, 1]));
+        else if (player.amethyst >= [3, 10][player.strike]) ws.send(new Uint8Array([3, 2]));
         if (result === 1) {
           stats.ok++;
           mine.ok++;

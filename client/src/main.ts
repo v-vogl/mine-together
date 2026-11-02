@@ -1,7 +1,10 @@
 import {
-  ACT_DIG, ACT_PLACE, ACT_WALL, AIR, ActResult, BEDROCK, CHUNK, ITEM_ROCK, ITEM_RUBBLE, ITEM_SPONGE, ITEM_WATER, Net, ROCK, REVEALED, RUBBLE,
+  ACT_DIG, ACT_PLACE, ACT_WALL, AIR, ActResult, BEDROCK, CHUNK, ITEM_ROCK, ITEM_RUBBLE, ITEM_SPONGE, ITEM_WATER, ITEM_QUARTZ, ITEM_AMETHYST, ITEM_CORAL, ITEM_EMBER, ITEM_LAVA, ITEM_OPAL, Net, REVEALED, RUBBLE,
   RUBBLE_FALLING, SHADOW, SPONGE, QUARTZ_ORE, UPGRADE_PICKAXE, UPGRADE_WALLS, SPRING_ROCK, SPRING, ROCK_CRACKED,
+  AMETHYST_ORE, UPGRADE_STRIKE, KIND_NAMES, ROCK_ITEMS, ROCK_KINDS, rockState,
   SPONGE_ORE, TYPE_MASK, WALL, WALL_CRACKED, WALL_CRUMBLING, WATER, type PlayerState, type Welcome,
+  recoveryCode, useRecoveryCode, CORAL_ORE, CORAL, EMBER, STEAM,
+  MAGMA, MOLTEN, LAVA_ROCK, LAVA_ROCK_CHIPPED, FIRE_OPAL,
 } from "./net";
 import { World } from "./world";
 import { Renderer } from "./render";
@@ -14,15 +17,25 @@ const UNSUPPORTED = "In the open sky, it has to rest against something solid";
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = $<HTMLCanvasElement>("view");
 
-type Tool = "dig" | "rock" | "water" | "rubble" | "wall" | "sponge";
+/** Placing tools for the kinds of rock, in ROCK_KINDS order ("rock" is stone). */
+const KIND_TOOLS = ["dirt", "rock", "granite", "slate", "basalt", "darkstone"] as const;
+type Tool = "dig" | (typeof KIND_TOOLS)[number] | "water" | "rubble" | "wall" | "sponge" | "quartz" | "amethyst" | "coral" | "ember" | "lava" | "opal";
 /** The item each placing tool sends with ACT_PLACE (walls use ACT_WALL). */
-const ITEMS: Partial<Record<Tool, number>> = { rock: ITEM_ROCK, water: ITEM_WATER, rubble: ITEM_RUBBLE, sponge: ITEM_SPONGE };
-/** Rock per rock block and per rubble block (server: sim.rs). */
+const ITEMS: Partial<Record<Tool, number>> = {
+  ...Object.fromEntries(KIND_TOOLS.map((t, k) => [t, ROCK_ITEMS[k]])), water: ITEM_WATER, rubble: ITEM_RUBBLE, sponge: ITEM_SPONGE,
+  quartz: ITEM_QUARTZ, amethyst: ITEM_AMETHYST, coral: ITEM_CORAL, ember: ITEM_EMBER,
+  lava: ITEM_LAVA, opal: ITEM_OPAL,
+};
+/** Stone per rubble block (server: sim.rs). */
 const ROCK_COST = 1;
-/** Upgrades (server: WALLS_UNLOCK_COST, PICKAXE_MAX, PICKAXE_STEP). Pickaxe level n to n + 1 costs n + 1 quartz. */
+const kindOf = (t: Tool) => (KIND_TOOLS as readonly string[]).indexOf(t);
+/** Upgrades (server: WALLS_UNLOCK_COST, PICKAXE_MAX, PICKAXE_STEP). Pickaxe level n to n + 1 costs 2^(n + 1) - 1 quartz. */
 const WALLS_UNLOCK_COST = 10;
 const PICKAXE_MAX = 5;
 const PICKAXE_STEP = 0.1;
+/** Amethyst per strike level (server: STRIKE_COSTS). */
+const STRIKE_COSTS = [3, 10];
+const isWall = (t: number) => t === WALL || t === WALL_CRACKED || t === WALL_CRUMBLING;
 interface Action { kind: number; x: number; y: number; arg: number }
 
 let world: World | null = null;
@@ -39,6 +52,13 @@ let rain = 0;
 /** How dark the sky should get: 0 dry up to 1 for heavy rain. */
 let rainTarget = 0;
 const RAIN_TEXT = ["", "light rain", "rain", "heavy rain!"];
+const UPWELLING_TEXT = ["", "the deep is stirring…", "Upwelling!", "eruption!", "veins cooling"];
+/** The Upwelling phase (see Stats); the view trembles when the deep starts stirring and when the volcano erupts. */
+let upwelling = 0;
+let eruptedAt = 0;
+let stirredAt = 0;
+const ERUPTION_SHAKE_MS = 2500;
+const STIR_SHAKE_MS = 8000;
 const RAIN_DARKNESS = [0, 0.45, 0.75, 1];
 /** Current action speed from the server; cooldowns are divided by it. */
 let speed = 1;
@@ -64,6 +84,9 @@ const net = new Net({
     $("wall-cost").textContent = String(w.wallCost);
     if (DEV) net.brush(brush);
     selectTool(tool);
+    if (!recalled(HINT_DONE)) $("hint").hidden = false;
+    // The leaderboard starts open, unless this browser minimized it last time.
+    toggleLeaders(!recalled(LEADERS_HIDDEN), false);
     if (!cameraPlaced) {
       cam.scale = Math.min(20, Math.max(4, canvas.clientWidth / 110));
       cam.centreOn(w.spawnX + 0.5, w.spawnY, canvas);
@@ -81,6 +104,10 @@ const net = new Net({
       cooldownEnd = 0;
     }
     if (p.result === ActResult.Cooldown && !queued) queued = lastSent;
+    if (p.result === ActResult.Ok && lastSent?.kind === ACT_DIG && !$("hint").hidden) {
+      $("hint").hidden = true;
+      remember(HINT_DONE);
+    }
     if (p.result === ActResult.NoResources) toast(poorMessage(tool));
     if (p.result === ActResult.NotVisible) toast("You can't see that cell yet");
     if (p.result === ActResult.WrongTarget) toast("Can't do that there");
@@ -93,11 +120,37 @@ const net = new Net({
     $("online").textContent = `${s.online} online`;
     speed = s.speed || 1;
     $("speed").textContent = `speed ×${speed.toFixed(2).replace(/\.?0+$/, "")}`;
+    // The record depth is not shown (the top bar stays small; new records are announced), but it still limits
+    // how far down the camera can go.
     recordDepth = s.recordDepth;
-    $("record").textContent = `Record depth: ${s.recordDepth} m`;
     rainTarget = RAIN_DARKNESS[s.rain] ?? 1;
     $("rain").textContent = RAIN_TEXT[s.rain] ?? "rain";
     $("rain").hidden = s.rain === 0;
+    if (s.upwelling === 3 && upwelling !== 3) eruptedAt = performance.now();
+    if (s.upwelling === 1 && upwelling !== 1) stirredAt = performance.now();
+    upwelling = s.upwelling;
+    $("upwelling").textContent = UPWELLING_TEXT[s.upwelling] ?? "Upwelling!";
+    $("upwelling").hidden = s.upwelling === 0;
+  },
+  announce: (text) => notice(text),
+  leaders(l) {
+    const row = (rank: number, name: string, mined: number, me: boolean) => {
+      const li = document.createElement("li");
+      li.className = me ? "me" : "";
+      for (const [cls, text] of [["rank", `${rank}.`], ["n", name], ["", String(mined)]]) {
+        const span = document.createElement("span");
+        span.className = cls;
+        span.textContent = text;
+        li.append(span);
+      }
+      return li;
+    };
+    $("leaders-list").replaceChildren(...l.top.map((p, k) => row(k + 1, p.name, p.mined, p.name === l.name)));
+    if (l.top.length === 0) $("leaders-list").textContent = "Nobody has dug yet.";
+    // Your own line, unless you are in the top list already.
+    const inTop = l.top.some((p) => p.name === l.name);
+    $("leaders-me").replaceChildren(...(inTop ? [] : row(l.rank, `${l.name} (you)`, l.mined, true).childNodes));
+    $("leaders-me").hidden = inTop;
   },
   connected(open) {
     $("overlay").hidden = open;
@@ -106,39 +159,85 @@ const net = new Net({
   },
 });
 
+/** The first-dig hint is shown until a player's first dig, once per browser. */
+const HINT_DONE = "mt-dug";
+/** Set while the player keeps the leaderboard minimized. */
+const LEADERS_HIDDEN = "mt-leaders-hidden";
+/** Set while the player has carved (rounded) rock edges switched on with the E key. */
+const CARVED = "mt-carved";
+
+function recalled(key: string): boolean {
+  try {
+    return localStorage.getItem(key) !== null;
+  } catch {
+    return false;
+  }
+}
+
+function remember(key: string, on = true) {
+  try {
+    if (on) localStorage.setItem(key, "1");
+    else localStorage.removeItem(key);
+  } catch {
+    // Private windows may refuse; the hint then shows again next time.
+  }
+}
+
 // ---- Actions -------------------------------------------------------------------------------------
 
 function cellName(v: number): string {
   if ((v & (REVEALED | SHADOW)) === 0) return "Unknown";
   const t = v & TYPE_MASK;
   if (t === AIR) return "Air";
-  if (t === ROCK) return "Rock";
+  const rock = rockState(t);
+  if (rock) {
+    const name = KIND_NAMES[rock.kind];
+    const hits = `${rock.left} ${rock.left === 1 ? "hit" : "hits"}`;
+    if (ROCK_KINDS.includes(t)) return rock.left > 1 ? `${name} (${hits})` : name;
+    return `Chipped ${name.toLowerCase()} (${hits} left)`;
+  }
+  if (t === AMETHYST_ORE) return "Amethyst";
   if (t === WATER) return "Water";
   if (t === WALL) return "Wall";
   if (t === WALL_CRACKED) return "Cracked wall";
   if (t === WALL_CRUMBLING) return "Crumbling wall";
-  if (t === SPONGE_ORE) return "Spongestone ore";
-  if (t === SPONGE) return "Spongestone (soaks up water)";
+  if (t === SPONGE_ORE) return "Spongerock ore";
+  if (t === SPONGE) return "Spongerock";
   if (t === RUBBLE || t === RUBBLE_FALLING) return "Rubble";
   if (t === BEDROCK) return "Bedrock";
-  if (t === QUARTZ_ORE) return "Quartz (for upgrades)";
-  if (t === SPRING_ROCK) return "Damp rock (a spring is behind it)";
-  if (t === SPRING) return "Spring (plug its sides with walls or rubble)";
-  if (t === ROCK_CRACKED) return "Cracked ceiling (about to cave in)";
+  if (t === QUARTZ_ORE) return "Quartz";
+  if (t === SPRING_ROCK) return "Damp rock";
+  if (t === SPRING) return "Spring";
+  if (t === ROCK_CRACKED) return "Cracked ceiling";
+  if (t === CORAL_ORE) return "Swellcoral reef";
+  if (t === CORAL) return "Swellcoral";
+  if (t === EMBER) return "Emberstone";
+  if (t === STEAM) return "Steam";
+  if (t === MAGMA) return "Magma";
+  if (t === MOLTEN) return "Molten vein";
+  if (t === LAVA_ROCK) return "Lava rock (2 hits)";
+  if (t === LAVA_ROCK_CHIPPED) return "Chipped lava rock (1 hit left)";
+  if (t === FIRE_OPAL) return "Fire opal";
   return "Unknown";
 }
 
 /** Visible air: hidden cells also read as 0, so check the revealed bit too. */
 function isOpenAir(x: number, y: number): boolean {
-  return world!.get(x, y) === REVEALED;
+  const v = world!.get(x, y);
+  return v === REVEALED || v === (REVEALED | STEAM);
 }
 
 /** Same rule as the server: a cell can be acted on only if it touches visible air. */
 function reachable(x: number, y: number): boolean {
   const v = world!.get(x, y);
   if ((v & REVEALED) === 0) return false;
-  return (v & TYPE_MASK) === AIR || isOpenAir(x + 1, y) || isOpenAir(x - 1, y) || isOpenAir(x, y + 1) ||
+  return (v & TYPE_MASK) === AIR || (v & TYPE_MASK) === STEAM || isOpenAir(x + 1, y) || isOpenAir(x - 1, y) || isOpenAir(x, y + 1) ||
     isOpenAir(x, y - 1);
+}
+
+function touchesWall(x: number, y: number): boolean {
+  const wallAt = (nx: number, ny: number) => (world!.get(nx, ny) & REVEALED) !== 0 && isWall(world!.get(nx, ny) & TYPE_MASK);
+  return wallAt(x + 1, y) || wallAt(x - 1, y) || wallAt(x, y + 1) || wallAt(x, y - 1);
 }
 
 /** Same rule as the server: in the open sky (above the surface) a block must touch something solid. */
@@ -146,7 +245,7 @@ function supported(x: number, y: number): boolean {
   if (y >= world!.surface[x]) return true;
   const solid = (nx: number, ny: number) => {
     const v = world!.get(nx, ny);
-    return (v & REVEALED) !== 0 && (v & TYPE_MASK) !== AIR && (v & TYPE_MASK) !== WATER;
+    return (v & REVEALED) !== 0 && ![AIR, WATER, STEAM, MAGMA, RUBBLE_FALLING].includes(v & TYPE_MASK);
   };
   return solid(x + 1, y) || solid(x - 1, y) || solid(x, y + 1) || solid(x, y - 1);
 }
@@ -161,10 +260,13 @@ function actionAt(x: number, y: number): Action | null {
     if (tool === "wall") return { kind: ACT_WALL, x, y, arg: 0 };
     return { kind: ACT_PLACE, x, y, arg: ITEMS[tool]! };
   }
-  if (!reachable(x, y)) return null;
   if (tool === "wall" && !player?.wallsUnlocked) return null;
   const t = world.get(x, y) & TYPE_MASK;
-  if (tool === "dig") return t === AIR || t === BEDROCK || t === SPRING ? null : { kind: ACT_DIG, x, y, arg: 0 };
+  // Walls can also be built on from an existing wall, into open cells next to it (same rule as the server).
+  const wallReach = tool === "wall" && (world.get(x, y) & REVEALED) !== 0 && touchesWall(x, y) &&
+    (t === AIR || t === WATER || isWall(t));
+  if (!reachable(x, y) && !wallReach) return null;
+  if (tool === "dig") return [AIR, STEAM, BEDROCK, SPRING, MAGMA, MOLTEN].includes(t) ? null : { kind: ACT_DIG, x, y, arg: 0 };
   // The wall tool on a cracked wall repairs it.
   if (tool === "wall" && (t === WALL_CRACKED || t === WALL_CRUMBLING)) return { kind: ACT_WALL, x, y, arg: 0 };
   if (t !== AIR && t !== WATER) return null;
@@ -179,17 +281,31 @@ function actionAt(x: number, y: number): Action | null {
 /** Whether the player has what the tool costs (the wall tool's repair cost is checked when clicking). */
 function canAfford(t: Tool): boolean {
   if (!player || DEV) return true;
-  if (t === "rock" || t === "rubble") return player.rock >= ROCK_COST;
+  if (kindOf(t) >= 0) return player.kinds[kindOf(t)] > 0;
+  if (t === "rubble") return player.rock >= ROCK_COST;
   if (t === "water") return player.water >= 1;
   if (t === "wall") return player.rock >= (welcome?.wallCost ?? 3);
   if (t === "sponge") return player.sponge > 0;
+  if (t === "quartz") return player.quartz > 0;
+  if (t === "amethyst") return player.amethyst > 0;
+  if (t === "coral") return player.coral > 0;
+  if (t === "ember") return player.ember > 0;
+  if (t === "lava") return player.lava > 0;
+  if (t === "opal") return player.opal > 0;
   return true;
 }
 
 function poorMessage(t: Tool): string {
-  if (t === "water") return "No water: scoop some up first";
-  if (t === "sponge") return "No spongestone left";
-  return "Not enough rock";
+  if (t === "water") return "No water left";
+  if (t === "sponge") return "No spongerock left";
+  if (t === "quartz") return "No quartz left";
+  if (t === "amethyst") return "No amethyst left";
+  if (t === "coral") return "No swellcoral left";
+  if (t === "ember") return "No emberstone left";
+  if (t === "lava") return "No lava rock left";
+  if (t === "opal") return "No fire opal left";
+  if (kindOf(t) >= 0) return `No ${KIND_NAMES[kindOf(t)].toLowerCase()} left`;
+  return "Not enough stone";
 }
 
 /** What the dig tool would do on the hovered cell, for its button and the cell info. */
@@ -214,7 +330,7 @@ function send(a: Action) {
   cooldownTotal = a.kind === ACT_WALL ? (repair ? c.dig : c.wall)
     : place === ITEM_RUBBLE || place === ITEM_ROCK ? c.dig
     : place === ITEM_WATER ? c.collect
-    : place === ITEM_SPONGE ? c.place
+    : [ITEM_SPONGE, ITEM_QUARTZ, ITEM_AMETHYST, ITEM_CORAL, ITEM_EMBER, ITEM_LAVA, ITEM_OPAL].includes(place) ? c.place
     : t === WATER ? c.collect : c.dig;
   cooldownTotal /= speed;
   if (a.kind === ACT_DIG && t !== WATER) cooldownTotal /= 1 + (player?.pickaxe ?? 0) * PICKAXE_STEP;
@@ -276,6 +392,9 @@ function notice(text: string) {
 
 function selectTool(t: Tool) {
   if (t === "sponge" && $("sponge-tool").hidden) return;
+  if (t === "quartz" && $("quartz-tool").hidden) return;
+  if (t === "amethyst" && $("amethyst-tool").hidden) return;
+  if (["coral", "ember", "lava", "opal"].includes(t) && $(`${t}-tool`).hidden) return;
   if (t === "wall" && $("wall-tool").hidden) return;
   tool = t;
   queued = null;
@@ -284,48 +403,109 @@ function selectTool(t: Tool) {
 
 function updateInventory() {
   if (!player) return;
-  $("rock").textContent = String(player.rock);
+  KIND_TOOLS.forEach((t, k) => {
+    $(t).textContent = String(player!.kinds[k]);
+    // The deeper kinds show up in the toolbar once you have found some.
+    const slot = document.querySelector<HTMLElement>(`.slot[data-tool="${t}"]`)!;
+    if (player!.kinds[k] > 0) slot.hidden = false;
+  });
   $("water").textContent = String(player.water);
   $("sponge").textContent = String(player.sponge);
-  // Spongestone shows up in the toolbar once you have found some.
+  // Spongerock shows up in the toolbar once you have found some.
   if (player.sponge > 0 && $("sponge-tool").hidden) {
     $("sponge-tool").hidden = false;
-    notice("You found spongestone! Place it next to water to soak it up");
+    notice("You found spongerock!");
   }
   // Slots you cannot pay for right now are dimmed, their price in red.
   document.querySelectorAll<HTMLElement>(".slot").forEach((b) => b.classList.toggle("poor", !canAfford(b.dataset.tool as Tool)));
   $("quartz").textContent = String(player.quartz);
+  $("amethyst").textContent = String(player.amethyst);
+  const knowsAmethyst = player.amethyst > 0 || player.strike > 0;
+  if (knowsAmethyst && $("amethyst-tool").hidden) {
+    $("amethyst-tool").hidden = false;
+    notice("You found amethyst!");
+  }
   const knowsQuartz = player.quartz > 0 || player.pickaxe > 0;
-  if (knowsQuartz && $("quartz-count").hidden) {
-    $("quartz-count").hidden = false;
-    notice("You found quartz! Spend it on pickaxe upgrades");
+  if (knowsQuartz && $("quartz-tool").hidden) {
+    $("quartz-tool").hidden = false;
+    notice("You found quartz!");
   }
   if (player.wallsUnlocked && $("wall-tool").hidden) $("wall-tool").hidden = false;
+  $("coral").textContent = String(player.coral);
+  if (player.coral > 0 && $("coral-tool").hidden) {
+    $("coral-tool").hidden = false;
+    notice("You found swellcoral!");
+  }
+  $("ember").textContent = String(player.ember);
+  if (player.ember > 0 && $("ember-tool").hidden) {
+    $("ember-tool").hidden = false;
+    notice("You found emberstone!");
+  }
+  $("lava").textContent = String(player.lava);
+  if (player.lava > 0) $("lava-tool").hidden = false;
+  $("opal").textContent = String(player.opal);
+  if (player.opal > 0 && $("opal-tool").hidden) {
+    $("opal-tool").hidden = false;
+    notice("You found a fire opal!");
+  }
   // The Upgrades button appears once there is something to buy, and then stays.
-  const canShop = player.rock >= WALLS_UNLOCK_COST || player.wallsUnlocked || knowsQuartz;
+  const canShop = player.rock >= WALLS_UNLOCK_COST || player.wallsUnlocked || knowsQuartz || knowsAmethyst;
   if (canShop && $("shop-button").hidden) {
     $("shop-button").hidden = false;
-    if (!knowsQuartz && !player.wallsUnlocked) notice("10 rock: you can unlock walls in Upgrades");
+    if (!knowsQuartz && !player.wallsUnlocked) notice("10 stone: you can unlock walls in Upgrades");
   }
   updateShop();
+}
+
+/** A price as a number and the material's swatch, like the hotbar badges. */
+function price(amount: number, material: "stone" | "quartz" | "amethyst"): Node[] {
+  const swatch = document.createElement("span");
+  swatch.className = `swatch ${material === "stone" ? "rock" : material}-swatch`;
+  swatch.title = material;
+  return [document.createTextNode(`${amount} `), swatch];
 }
 
 function updateShop() {
   if (!player) return;
   const walls = $<HTMLButtonElement>("buy-walls");
-  walls.textContent = player.wallsUnlocked ? "Unlocked ✓" : `${WALLS_UNLOCK_COST} rock`;
+  if (player.wallsUnlocked) walls.textContent = "Unlocked ✓";
+  else walls.replaceChildren(...price(WALLS_UNLOCK_COST, "stone"));
   walls.disabled = player.wallsUnlocked || player.rock < WALLS_UNLOCK_COST;
 
   $("offer-pickaxe").hidden = player.quartz === 0 && player.pickaxe === 0;
-  const level = player.pickaxe, cost = level + 1;
+  const level = player.pickaxe, cost = 2 ** (level + 1) - 1;
   const pick = $<HTMLButtonElement>("buy-pickaxe");
   $("pickaxe-name").textContent = `Pickaxe level ${level}`;
   $("pickaxe-text").textContent = level >= PICKAXE_MAX
     ? `Digs ×${(1 + level * PICKAXE_STEP).toFixed(1)} as fast. Fully upgraded.`
     : `Digs ×${(1 + level * PICKAXE_STEP).toFixed(1)} as fast; next level ×${(1 + (level + 1) * PICKAXE_STEP).toFixed(1)}.`;
-  pick.textContent = level >= PICKAXE_MAX ? "Max level" : `${cost} quartz`;
+  if (level >= PICKAXE_MAX) pick.textContent = "Max level";
+  else pick.replaceChildren(...price(cost, "quartz"));
   pick.disabled = level >= PICKAXE_MAX || player.quartz < cost;
+
+  $("offer-strike").hidden = player.amethyst === 0 && player.strike === 0;
+  const strike = $<HTMLButtonElement>("buy-strike"), next = STRIKE_COSTS[player.strike];
+  $("strike-name").textContent = `Heavy strikes level ${player.strike}`;
+  $("strike-text").textContent = next === undefined
+    ? `Every hit does ${player.strike + 1} damage. Fully upgraded.`
+    : `Every hit does ${player.strike + 1} damage; next level ${player.strike + 2}.`;
+  if (next === undefined) strike.textContent = "Max level";
+  else strike.replaceChildren(...price(next, "amethyst"));
+  strike.disabled = next === undefined || player.amethyst < next;
 }
+
+/** The leaderboard asks the server again every few seconds while it is open. */
+let leadersTimer = 0;
+function toggleLeaders(open = $("leaders").hidden, save = true) {
+  $("leaders").hidden = !open;
+  if (save) remember(LEADERS_HIDDEN, !open);
+  clearInterval(leadersTimer);
+  if (open) {
+    net.leaders();
+    leadersTimer = window.setInterval(() => net.leaders(), 5000);
+  }
+}
+$("leaders-button").onclick = () => toggleLeaders();
 
 function toggleShop(open = $("shop").hidden) {
   if ($("shop-button").hidden) return;
@@ -333,6 +513,39 @@ function toggleShop(open = $("shop").hidden) {
 }
 
 $("shop-button").onclick = () => toggleShop();
+
+/** The menu (Esc): the recovery code to take progress to another browser, and a field to enter one. */
+function toggleMenu(open = $("menu").hidden) {
+  $("menu").hidden = !open;
+  if (!open) return;
+  showCode(false);
+  $<HTMLInputElement>("code-enter").value = "";
+  $("code-error").hidden = true;
+  $("code-copy").textContent = "Copy";
+}
+/** The recovery code is hidden unless asked for, so it does not end up on a stream or a screenshot. */
+function showCode(show: boolean) {
+  const mine = $<HTMLInputElement>("code-mine");
+  mine.value = show ? recoveryCode() : recoveryCode().replace(/[0-9a-f]/g, "•");
+  mine.dataset.shown = show ? "1" : "";
+  $("code-show").textContent = show ? "Hide" : "Show";
+}
+$("menu-button").onclick = () => toggleMenu();
+$("code-show").onclick = () => showCode(!$("code-mine").dataset.shown);
+$("menu-close").onclick = () => toggleMenu(false);
+$("code-copy").onclick = () => {
+  navigator.clipboard?.writeText(recoveryCode()).then(() => ($("code-copy").textContent = "Copied"), () => {});
+};
+const useCode = () => {
+  const code = $<HTMLInputElement>("code-enter").value;
+  if (code.trim() === "") return;
+  if (useRecoveryCode(code)) location.reload();
+  else $("code-error").hidden = false;
+};
+$("code-use").onclick = useCode;
+$("code-enter").onkeydown = (e) => {
+  if (e.key === "Enter") useCode();
+};
 $("shop-close").onclick = () => toggleShop(false);
 $("buy-walls").onclick = () => {
   net.buy(UPGRADE_WALLS);
@@ -341,6 +554,10 @@ $("buy-walls").onclick = () => {
 $("buy-pickaxe").onclick = () => {
   net.buy(UPGRADE_PICKAXE);
   notice("Pickaxe upgraded!");
+};
+$("buy-strike").onclick = () => {
+  net.buy(UPGRADE_STRIKE);
+  notice("Your strikes got heavier!");
 };
 
 document.querySelectorAll<HTMLElement>(".tool").forEach((b) => (b.onclick = () => selectTool(b.dataset.tool as Tool)));
@@ -356,6 +573,12 @@ if (DEV) {
   $("dev").hidden = false;
   $("wall-tool").hidden = false;
   $("sponge-tool").hidden = false;
+  $("quartz-tool").hidden = false;
+  $("amethyst-tool").hidden = false;
+  $("coral-tool").hidden = false;
+  $("ember-tool").hidden = false;
+  $("lava-tool").hidden = false;
+  $("opal-tool").hidden = false;
   $<HTMLInputElement>("brush").oninput = (e) => setBrush(Number((e.target as HTMLInputElement).value));
 }
 
@@ -363,11 +586,22 @@ function goHome() {
   if (welcome) cam.centreOn(welcome.spawnX + 0.5, welcome.spawnY, canvas);
 }
 
+/** Carved rock edges (rounded corners, light on top edges): a look still being tried out, off by default. */
+let carved = recalled(CARVED);
+
 window.addEventListener("keydown", (e) => {
-  const keys: Record<string, Tool> = { "1": "dig", "2": "rock", "3": "water", "4": "rubble", "5": "wall", "6": "sponge" };
+  if (e.key === "Escape") return toggleMenu();
+  // Typing a recovery code is not a shortcut.
+  if (e.target instanceof HTMLInputElement && e.target.type !== "range") return;
+  const keys: Record<string, Tool> = { "1": "dig", "2": "dirt", "3": "rock", "4": "water", "5": "rubble", "6": "wall", "7": "sponge", "8": "quartz", "9": "amethyst" };
   if (keys[e.key]) selectTool(keys[e.key]);
   else if (e.key === "h" || e.key === "H") goHome();
   else if (e.key === "u" || e.key === "U") toggleShop();
+  else if (e.key === "l" || e.key === "L") toggleLeaders();
+  else if (e.key === "e" || e.key === "E") {
+    carved = !carved;
+    remember(CARVED, carved);
+  }
   else if (DEV && (e.key === "[" || e.key === "]")) setBrush(brush + (e.key === "]" ? 2 : -2));
 });
 
@@ -436,12 +670,22 @@ function frame(now: number) {
 
   rain += (rainTarget - rain) * 0.02;
   const ok = hover !== null && actionAt(hover[0], hover[1]) !== null;
+  // A slight tremble, a fraction of a screen pixel to two, so it is felt rather than seen.
+  const erupting = upwelling === 3 && now - eruptedAt < ERUPTION_SHAKE_MS;
+  const stirring = upwelling === 1 && now - stirredAt < STIR_SHAKE_MS;
+  const shake = stirring || erupting ? 1.5 / cam.scale : 0;
+  const [dx, dy] = [shake * Math.sin(now / 23), shake * Math.sin(now / 31)];
+  cam.x += dx;
+  cam.y += dy;
   renderer.draw(world, cam, now / 1000, {
     hover,
     hoverColour: ok ? [1, 1, 1] : [1, 0.35, 0.35],
     queued: queued ? [queued.x, queued.y] : null,
     rain,
     brush: DEV ? brush : 1,
+    carved,
   });
+  cam.x -= dx;
+  cam.y -= dy;
 }
 requestAnimationFrame(frame);

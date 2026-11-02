@@ -7,6 +7,7 @@ use crate::world::{self, World, CHUNK};
 use axum::body::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -17,25 +18,31 @@ const COOLDOWN_DIG: Duration = Duration::from_millis(1500);
 const COOLDOWN_COLLECT: Duration = Duration::from_millis(2500);
 const COOLDOWN_WALL: Duration = Duration::from_millis(4000);
 const COOLDOWN_PLACE: Duration = Duration::from_millis(3000);
-const WALL_COST: u32 = 3;
-/// Repairing a cracked wall costs this much rock and takes the dig cooldown, so one defender can hold
-/// a wall against one attacker, but not against a group.
-const REPAIR_COST: u32 = 1;
+const WALL_COST: u32 = 2;
+/// Repairing a cracked wall costs this much rock (nothing, so defending never runs dry) and takes the dig
+/// cooldown, so one defender can hold a wall against one attacker, but not against a group.
+const REPAIR_COST: u32 = 0;
 /// Rubble, dropped to fill flooded shafts, is cheap so a crowd can plug a leak.
 const RUBBLE_COST: u32 = 1;
 /// New players cannot build walls; unlocking them costs this much rock.
 const WALLS_UNLOCK_COST: u32 = 10;
 /// Pickaxe upgrades: level n digs (1 + n * PICKAXE_STEP) times as fast. Going from level n to n + 1
-/// costs n + 1 quartz.
+/// costs 2^(n + 1) - 1 quartz: 1, 3, 7, 15, 31.
 const PICKAXE_MAX: u8 = 5;
 const PICKAXE_STEP: f64 = 0.1;
+/// Heavier strikes: at level n every hit on rock does n + 1 damage (hard rock needs fewer hits). Reaching
+/// level n costs STRIKE_COSTS[n - 1] amethyst.
+const STRIKE_COSTS: [u32; 2] = [3, 10];
 /// Player actions get faster with few players and slower with many: speed = 2 - 0.5 * log10(players),
 /// so 1 player x2, 10 players x1.5, 100 players x1 (the cooldowns above), 300 players x0.76, and
 /// never outside these bounds.
 const SPEED_MIN: f64 = 0.5;
 const SPEED_MAX: f64 = 2.0;
-/// Placed spongestone soaks up a neighbouring water cell this often.
+/// Placed spongerock soaks up a neighbouring water cell this often.
 const ABSORB_EVERY_TICKS: u64 = 20;
+/// Living coral gets a turn to grow, and emberstone boils water, this often.
+const CORAL_EVERY_TICKS: u64 = 10;
+const BOIL_EVERY_TICKS: u64 = 10;
 
 const STATS_EVERY_TICKS: u64 = 10;
 /// While players are connected, print tick time and bandwidth this often.
@@ -52,6 +59,11 @@ const RAIN_MIN_PLAYERS: [usize; 3] = [0, 10, 50];
 const RAIN_NAMES: [&str; 3] = ["light", "normal", "heavy"];
 const RAIN_GAP_MIN_TICKS: u64 = 6000;
 const RAIN_GAP_RANDOM_TICKS: u64 = 6000;
+/// An Upwelling comes every 30 to 60 minutes, after a warning of STIR_TICKS (the deep is stirring). Its
+/// strength scales with the players online like rain (see rain_amount).
+const UPWELLING_GAP_MIN_TICKS: u64 = 18_000;
+const UPWELLING_GAP_RANDOM_TICKS: u64 = 18_000;
+const STIR_TICKS: u64 = 300;
 
 /// How much of a shower's full strength falls with this many players online: 40% alone, 70% at 10 players,
 /// all of it from 100 players.
@@ -71,7 +83,8 @@ fn action_speed(players: usize) -> f64 {
 }
 
 pub enum Cmd {
-    Connect { id: u64, token: String, dev: bool, outbox: Sender<Bytes> },
+    /// `limited`: the per-address limits apply (not to the dev client, bots with the key, or this machine).
+    Connect { id: u64, token: String, dev: bool, ip: IpAddr, limited: bool, outbox: Sender<Bytes> },
     Disconnect { id: u64 },
     Client { id: u64, msg: ClientMsg },
     Console(String),
@@ -86,12 +99,103 @@ struct Player {
     sponge: u32,
     quartz: u32,
     pickaxe: u8,
+    amethyst: u32,
+    strike: u8,
+    /// The other kinds of rock (`rock` is stone, which pays for walls and rubble).
+    dirt: u32,
+    /// Granite, slate, basalt, darkstone.
+    deep: [u32; 4],
+    coral: u32,
+    ember: u32,
+    lava: u32,
+    opal: u32,
     walls_unlocked: bool,
     cells_mined: u32,
     #[serde(skip)]
     ready_at: Option<Instant>,
     #[serde(skip)]
     cooldown: Duration,
+}
+
+/// Players on the leaderboard.
+const LEADERS_SHOWN: usize = 10;
+
+/// A player's display name, made from their token, e.g. "Dusty Mole 42": players have no accounts yet,
+/// and the same browser always gets the same name.
+fn display_name(token: &str) -> String {
+    const ADJECTIVES: [&str; 32] = [
+        "Dusty", "Brave", "Sleepy", "Mighty", "Muddy", "Swift", "Lucky", "Gritty", "Rusty", "Clever", "Shiny",
+        "Grumpy", "Jolly", "Sneaky", "Bold", "Quiet", "Wild", "Tiny", "Giant", "Soggy", "Rocky", "Hasty",
+        "Cosy", "Daring", "Fuzzy", "Nimble", "Stubborn", "Cheery", "Deep", "Gentle", "Restless", "Humble",
+    ];
+    const ANIMALS: [&str; 32] = [
+        "Mole", "Badger", "Wombat", "Rabbit", "Ferret", "Beetle", "Gopher", "Otter", "Armadillo", "Hedgehog",
+        "Marmot", "Weasel", "Shrew", "Vole", "Worm", "Ant", "Fox", "Bear", "Dwarf", "Gnome", "Penguin", "Crab",
+        "Lizard", "Newt", "Toad", "Raccoon", "Hamster", "Chipmunk", "Meerkat", "Aardvark", "Pangolin", "Squirrel",
+    ];
+    // FNV-1a: a stable hash, the same on every run.
+    let h = token.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+    let h = crate::noise::hash(h, 0, 0);
+    format!("{} {} {}", ADJECTIVES[(h % 32) as usize], ANIMALS[(h / 32 % 32) as usize], h / 1024 % 100)
+}
+
+/// Milestones already announced in this world, saved in milestones.json.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Milestones {
+    /// The world they belong to: a new world starts over.
+    seed: u64,
+    /// The last record depth announced.
+    depth: u32,
+    /// First finds already announced ("spongerock", "quartz", "spring").
+    firsts: std::collections::BTreeSet<String>,
+}
+
+/// Record depths worth announcing: every 25 m up to 100 m, then every 50 m.
+fn next_depth_milestone(after: u32) -> u32 {
+    if after < 100 {
+        (after / 25 + 1) * 25
+    } else {
+        (after / 50 + 1) * 50
+    }
+}
+
+/// The cell a found block makes when placed: crystals go back as they were found, coral is planted alive.
+fn block_cell(item: u8) -> Option<u8> {
+    match item {
+        protocol::ITEM_SPONGE => Some(world::SPONGE),
+        protocol::ITEM_QUARTZ => Some(world::QUARTZ_ORE),
+        protocol::ITEM_AMETHYST => Some(world::AMETHYST_ORE),
+        protocol::ITEM_CORAL => Some(world::CORAL),
+        protocol::ITEM_EMBER => Some(world::EMBER),
+        protocol::ITEM_LAVA => Some(world::LAVA_ROCK),
+        protocol::ITEM_OPAL => Some(world::FIRE_OPAL),
+        _ => None,
+    }
+}
+
+impl Player {
+    /// How many found blocks of this item (one block_cell knows) the player holds.
+    fn found_block(&mut self, item: u8) -> &mut u32 {
+        match item {
+            protocol::ITEM_SPONGE => &mut self.sponge,
+            protocol::ITEM_QUARTZ => &mut self.quartz,
+            protocol::ITEM_AMETHYST => &mut self.amethyst,
+            protocol::ITEM_CORAL => &mut self.coral,
+            protocol::ITEM_LAVA => &mut self.lava,
+            protocol::ITEM_OPAL => &mut self.opal,
+            _ => &mut self.ember,
+        }
+    }
+
+    /// How much this player holds of a kind of rock (index into world::ROCK_KINDS).
+    fn rock_kind(&mut self, kind: usize) -> &mut u32 {
+        match kind {
+            0 => &mut self.dirt,
+            1 => &mut self.rock,
+            k => &mut self.deep[k - 2],
+        }
+    }
 }
 
 struct Client {
@@ -101,10 +205,19 @@ struct Client {
     /// Connected with the dev key: no cooldowns or costs, and actions cover brush x brush cells.
     dev: bool,
     brush: u8,
+    ip: IpAddr,
+    limited: bool,
 }
 
 /// Largest dev brush.
 const BRUSH_MAX: u8 = 41;
+
+/// One internet address (a home, a school, or one person with a script opening many connections) acts like
+/// at most this many players: its actions share this many cooldowns, and it counts at most this many times
+/// towards the players online (which sets the action speed and the rain).
+const IP_SLOTS: usize = 3;
+/// Connections allowed per internet address (several tabs of one player count too); more are refused.
+const MAX_CONNECTIONS_PER_IP: usize = 10;
 
 pub struct Sim {
     world: World,
@@ -122,9 +235,24 @@ pub struct Sim {
     /// Fraction of a drop left over from the last tick.
     rain_carry: f64,
     next_rain: u64,
+    /// When the next Upwelling starts stirring, and, while it stirs, the tick it breaks loose.
+    next_upwelling: u64,
+    stirring_until: Option<u64>,
+    /// The stirring leads to a cataclysm, not an Upwelling.
+    cataclysm: bool,
+    /// The Upwelling phase last logged (see upwelling_phase).
+    logged_phase: u8,
     record_depth: u32,
     /// Distinct players connected (several tabs of one guest count once).
     players_online: usize,
+    milestones: Milestones,
+    /// The leaderboard (blocks mined, token), best first, and when it was last worked out.
+    leaders: Vec<(u32, String)>,
+    leaders_at: Option<Instant>,
+    /// Announcements from this step, sent to everyone after it.
+    announcements: Vec<String>,
+    /// For each limited internet address, when each of its IP_SLOTS shared cooldowns is over.
+    ip_slots: HashMap<IpAddr, [Instant; IP_SLOTS]>,
     rng: Rng,
     /// Load figures since the last report.
     tick_time: Duration,
@@ -139,8 +267,14 @@ impl Sim {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let chunk_count = world.chunks_wide() * world.chunks_high();
+        let milestones = std::fs::read(data_dir.join("milestones.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Milestones>(&b).ok())
+            .filter(|m| m.seed == world.seed)
+            .unwrap_or_else(|| Milestones { seed: world.seed, depth: world.deepest_dig(), ..Default::default() });
         let mut rng = Rng::new(world.seed ^ 0x7A1);
         let next_rain = RAIN_GAP_MIN_TICKS + rng.below(RAIN_GAP_RANDOM_TICKS);
+        let next_upwelling = UPWELLING_GAP_MIN_TICKS + rng.below(UPWELLING_GAP_RANDOM_TICKS);
         Sim {
             record_depth: world.deepest_dig(),
             world,
@@ -154,7 +288,16 @@ impl Sim {
             rain_strength: 0,
             rain_carry: 0.0,
             next_rain,
+            next_upwelling,
+            stirring_until: None,
+            cataclysm: false,
+            logged_phase: 0,
             players_online: 0,
+            ip_slots: HashMap::new(),
+            milestones,
+            leaders: Vec::new(),
+            leaders_at: None,
+            announcements: Vec::new(),
             rng,
             tick_time: Duration::ZERO,
             tick_time_max: Duration::ZERO,
@@ -197,12 +340,17 @@ impl Sim {
 
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Connect { id, token, dev, outbox } => {
+            Cmd::Connect { id, token, dev, ip, limited, outbox } => {
                 if dev {
                     println!("dev client connected");
                 }
+                // Refused: dropping the outbox closes the connection.
+                if limited && self.clients.values().filter(|c| c.ip == ip).count() >= MAX_CONNECTIONS_PER_IP {
+                    return;
+                }
                 self.players.entry(token.clone()).or_default();
-                self.clients.insert(id, Client { token, outbox, chunks: HashSet::new(), dev, brush: 1 });
+                let client = Client { token, outbox, chunks: HashSet::new(), dev, brush: 1, ip, limited };
+                self.clients.insert(id, client);
                 self.count_players();
                 let welcome = self.welcome();
                 self.send(id, welcome);
@@ -215,7 +363,9 @@ impl Sim {
             Cmd::Client { id, msg: ClientMsg::Action { kind, x, y, arg } } => {
                 let result = self.act(id, kind, x, y, arg);
                 self.send_player(id, result);
+                self.send_announcements();
             }
+            Cmd::Client { id, msg: ClientMsg::Leaders } => self.send_leaders(id),
             Cmd::Client { id, msg: ClientMsg::Brush(size) } => {
                 if let Some(c) = self.clients.get_mut(&id).filter(|c| c.dev) {
                     c.brush = size.clamp(1, BRUSH_MAX);
@@ -241,6 +391,8 @@ impl Sim {
                     self.start_rain(pick);
                 }
             }
+            ("upwell", _) => self.stir(false),
+            ("cataclysm", _) => self.stir(true),
             ("save", _) => self.save(false),
             ("stats", _) => println!(
                 "{} clients, {} players known, record depth {}",
@@ -249,7 +401,7 @@ impl Sim {
                 self.record_depth
             ),
             ("", _) => {}
-            _ => println!("commands: rain [light|normal|heavy], save, stats, quit"),
+            _ => println!("commands: rain [light|normal|heavy], upwell, cataclysm, save, stats, quit"),
         }
     }
 
@@ -266,7 +418,14 @@ impl Sim {
         if self.ticks % ABSORB_EVERY_TICKS == 0 {
             self.world.absorb();
         }
+        if self.ticks % CORAL_EVERY_TICKS == 0 {
+            self.world.grow_coral();
+        }
+        if self.ticks % BOIL_EVERY_TICKS == 5 {
+            self.world.boil();
+        }
         self.rain();
+        self.upwelling();
         self.world.update_sight();
         self.send_diffs();
         if self.ticks % STATS_EVERY_TICKS == 0 {
@@ -314,6 +473,57 @@ impl Sim {
         println!("{} rain started", RAIN_NAMES[strength]);
     }
 
+    /// The deep starts stirring: an Upwelling (or with `cataclysm`, a cataclysm) breaks loose after STIR_TICKS.
+    fn stir(&mut self, cataclysm: bool) {
+        if self.stirring_until.is_some() || self.world.upwelling_phase() != 0 {
+            println!("an Upwelling is already going on");
+            return;
+        }
+        self.stirring_until = Some(self.ticks + STIR_TICKS);
+        self.cataclysm = cataclysm;
+        self.announcements.push(if cataclysm {
+            "The whole island is shaking… a cataclysm is coming.".to_string()
+        } else {
+            "The deep is stirring… an Upwelling is coming.".to_string()
+        });
+    }
+
+    fn upwelling(&mut self) {
+        if self.ticks >= self.next_upwelling {
+            self.next_upwelling = self.ticks + UPWELLING_GAP_MIN_TICKS + self.rng.below(UPWELLING_GAP_RANDOM_TICKS);
+            self.stir(false);
+        }
+        if self.stirring_until.is_some_and(|t| self.ticks >= t) {
+            self.stirring_until = None;
+            if self.cataclysm {
+                self.world.start_cataclysm();
+            } else {
+                self.world.start_upwelling(rain_amount(self.players_online));
+            }
+        }
+        match self.world.step_upwelling() {
+            Some(world::UpwellingNews::Erupted) => self
+                .announcements
+                .push("The Upwelling broke through: a volcano is erupting!".to_string()),
+            Some(world::UpwellingNews::Over) => {
+                self.announcements.push("The Upwelling is over.".to_string());
+            }
+            None => {}
+        }
+        let phase = self.upwelling_phase();
+        if phase != self.logged_phase {
+            self.logged_phase = phase;
+            let (tips, vents, molten) = self.world.upwelling_counts();
+            let name = ["over", "stirring", "veins rising", "erupting", "veins cooling"][phase as usize];
+            println!("upwelling: {name} ({tips} vein tips, {vents} vents, {molten} molten cells)");
+        }
+    }
+
+    /// What clients see of the Upwelling: 0 none, 1 stirring, 2 veins rising, 3 erupting, 4 veins cooling.
+    fn upwelling_phase(&self) -> u8 {
+        if self.stirring_until.is_some() { 1 } else { self.world.upwelling_phase() }
+    }
+
     fn rain(&mut self) {
         if self.rain_left == 0 && self.ticks >= self.next_rain {
             self.start_rain(None);
@@ -336,8 +546,14 @@ impl Sim {
         }
     }
 
+    /// Distinct players online, each limited internet address counting at most IP_SLOTS times.
     fn count_players(&mut self) {
-        self.players_online = self.clients.values().map(|c| &c.token).collect::<HashSet<_>>().len();
+        let mut per_ip: HashMap<Option<IpAddr>, HashSet<&String>> = HashMap::new();
+        for c in self.clients.values() {
+            per_ip.entry(c.limited.then_some(c.ip)).or_default().insert(&c.token);
+        }
+        self.players_online =
+            per_ip.iter().map(|(ip, tokens)| if ip.is_some() { tokens.len().min(IP_SLOTS) } else { tokens.len() }).sum();
     }
 
     fn speed(&self) -> f64 {
@@ -351,9 +567,21 @@ impl Sim {
             let brush = client.brush;
             return self.dev_act(kind, x as usize, y as usize, arg, brush);
         }
+        let limited_ip = client.limited.then_some(client.ip);
         let player = self.players.get_mut(&client.token).expect("player exists for every client");
         let now = Instant::now();
         if player.ready_at.is_some_and(|t| t > now) {
+            return ActResult::Cooldown;
+        }
+        // The address's shared cooldowns: the one that is over soonest. If none is over yet, this player
+        // waits for it too.
+        let slot = limited_ip.map(|ip| {
+            let slots = self.ip_slots.entry(ip).or_insert([now; IP_SLOTS]);
+            (0..IP_SLOTS).min_by_key(|&k| slots[k]).map(|k| (ip, k, slots[k])).unwrap()
+        });
+        if let Some((_, _, free_at)) = slot.filter(|&(_, _, free_at)| free_at > now) {
+            player.ready_at = Some(free_at);
+            player.cooldown = free_at - now;
             return ActResult::Cooldown;
         }
         let (x, y) = (x as usize, y as usize);
@@ -364,10 +592,13 @@ impl Sim {
         if !self.world.is_revealed(i) {
             return ActResult::NotVisible;
         }
-        if !self.world.reachable(i) {
+        let t = self.world.ty(i);
+        // Walls can also be built on from an existing wall: into open cells next to one (down into a
+        // flooded shaft, say), and repaired there; never into rock or other solid ground.
+        let wall_reach = kind == protocol::ACT_WALL && self.world.touches_wall(i) && (world::is_open(t) || world::is_wall(t));
+        if !self.world.reachable(i) && !wall_reach {
             return ActResult::OutOfReach;
         }
-        let t = self.world.ty(i);
 
         let cooldown = match kind {
             protocol::ACT_DIG => match t {
@@ -376,13 +607,21 @@ impl Sim {
                     self.world.dig(i);
                     COOLDOWN_COLLECT
                 }
-                world::ROCK => {
-                    player.rock += 1;
-                    player.cells_mined += 1;
-                    self.world.dig(i);
+                // Deeper rock takes several hits (world::hits_left); each hit but the last wears it down. Heavier
+                // strikes do more damage per hit.
+                t if world::rock_state(t).is_some() => {
+                    let (kind, left) = world::rock_state(t).unwrap();
+                    let left = left.saturating_sub(1 + player.strike);
+                    if left > 0 {
+                        self.world.set_type(i, world::worn(kind, left));
+                    } else {
+                        *player.rock_kind(kind) += 1;
+                        player.cells_mined += 1;
+                        self.world.dig(i);
+                    }
                     COOLDOWN_DIG
                 }
-                // Walls take three hits: intact, cracked, crumbling, gone (1 rock back).
+                // Walls take three hits: intact, cracked, crumbling, gone.
                 world::WALL => {
                     self.world.set_type(i, world::WALL_CRACKED);
                     COOLDOWN_DIG
@@ -391,8 +630,9 @@ impl Sim {
                     self.world.set_type(i, world::WALL_CRUMBLING);
                     COOLDOWN_DIG
                 }
+                // Breaking a wall gives back all the rock it cost.
                 world::WALL_CRUMBLING => {
-                    player.rock += 1;
+                    player.rock += WALL_COST;
                     self.world.dig(i);
                     COOLDOWN_DIG
                 }
@@ -414,8 +654,43 @@ impl Sim {
                     self.world.set_type(i, world::SPRING);
                     COOLDOWN_DIG
                 }
+                world::AMETHYST_ORE => {
+                    player.amethyst += 1;
+                    player.cells_mined += 1;
+                    self.world.dig(i);
+                    COOLDOWN_DIG
+                }
                 world::QUARTZ_ORE => {
                     player.quartz += 1;
+                    player.cells_mined += 1;
+                    self.world.dig(i);
+                    COOLDOWN_DIG
+                }
+                world::CORAL_ORE | world::CORAL => {
+                    player.coral += 1;
+                    player.cells_mined += 1;
+                    self.world.dig(i);
+                    COOLDOWN_DIG
+                }
+                // Lava rock takes two hits (one with heavier strikes).
+                world::LAVA_ROCK if player.strike == 0 => {
+                    self.world.set_type(i, world::LAVA_ROCK_CHIPPED);
+                    COOLDOWN_DIG
+                }
+                world::LAVA_ROCK | world::LAVA_ROCK_CHIPPED => {
+                    player.lava += 1;
+                    player.cells_mined += 1;
+                    self.world.dig(i);
+                    COOLDOWN_DIG
+                }
+                world::FIRE_OPAL => {
+                    player.opal += 1;
+                    player.cells_mined += 1;
+                    self.world.dig(i);
+                    COOLDOWN_DIG
+                }
+                world::EMBER => {
+                    player.ember += 1;
                     player.cells_mined += 1;
                     self.world.dig(i);
                     COOLDOWN_DIG
@@ -474,23 +749,24 @@ impl Sim {
                     player.rock -= WALL_COST;
                     self.world.set_type(i, world::WALL);
                     COOLDOWN_WALL
-                } else if arg == protocol::ITEM_ROCK {
-                    if player.rock == 0 {
+                } else if let Some(kind) = protocol::item_rock_kind(arg) {
+                    let held = player.rock_kind(kind);
+                    if *held == 0 {
                         return ActResult::NoResources;
                     }
-                    player.rock -= 1;
-                    self.world.set_type(i, world::ROCK);
+                    *held -= 1;
+                    self.world.set_type(i, world::ROCK_KINDS[kind]);
                     COOLDOWN_DIG
-                } else {
-                    if arg != protocol::ITEM_SPONGE {
-                        return ActResult::WrongTarget;
-                    }
-                    if player.sponge == 0 {
+                } else if let Some(cell) = block_cell(arg) {
+                    let held = player.found_block(arg);
+                    if *held == 0 {
                         return ActResult::NoResources;
                     }
-                    player.sponge -= 1;
-                    self.world.set_type(i, world::SPONGE);
+                    *held -= 1;
+                    self.world.set_type(i, cell);
                     COOLDOWN_PLACE
+                } else {
+                    return ActResult::WrongTarget;
                 }
             }
             _ => return ActResult::WrongTarget,
@@ -504,16 +780,43 @@ impl Sim {
         let cooldown = cooldown.div_f64(speed * pickaxe);
         player.ready_at = Some(now + cooldown);
         player.cooldown = cooldown;
+        if let Some((ip, k, _)) = slot {
+            if let Some(slots) = self.ip_slots.get_mut(&ip) {
+                slots[k] = now + cooldown;
+            }
+        }
 
         if self.world.ty(i) == world::AIR && y > self.world.surface[x] as usize {
             self.record_depth = self.record_depth.max((y - self.world.surface[x] as usize) as u32);
+            let next = next_depth_milestone(self.milestones.depth);
+            if self.record_depth >= next {
+                self.milestones.depth = next;
+                self.announcements.push(format!("New record depth: {next} m!"));
+            }
+        }
+        if kind == protocol::ACT_DIG {
+            let first = match t {
+                world::SPONGE_ORE => Some(("spongerock", "Someone found the first spongerock!")),
+                world::QUARTZ_ORE => Some(("quartz", "Someone found the first quartz!")),
+                world::AMETHYST_ORE => Some(("amethyst", "Someone found the first amethyst!")),
+                world::SPRING_ROCK => Some(("spring", "A spring burst open!")),
+                world::CORAL_ORE => Some(("coral", "Someone found the first swellcoral!")),
+                world::EMBER => Some(("ember", "Someone found the first emberstone!")),
+                world::FIRE_OPAL => Some(("opal", "Someone found the first fire opal!")),
+                _ => None,
+            };
+            if let Some((name, text)) = first {
+                if self.milestones.firsts.insert(name.to_string()) {
+                    self.announcements.push(text.to_string());
+                }
+            }
         }
         ActResult::Ok
     }
 
     /// A dev client's action: no cooldown, no cost, no reach or sight rules, applied to every cell of a
     /// brush x brush square around (x, y). Digging takes everything but bedrock and springs (damp rock
-    /// opens its spring); walls, rubble and spongestone fill the open cells.
+    /// opens its spring); walls, rubble and spongerock fill the open cells.
     fn dev_act(&mut self, kind: u8, x: usize, y: usize, arg: u8, brush: u8) -> ActResult {
         let r = (brush / 2) as i64;
         for dy in -r..=r {
@@ -533,8 +836,10 @@ impl Sim {
                     },
                     protocol::ACT_WALL if open => world::WALL,
                     protocol::ACT_PLACE if open && arg == protocol::ITEM_RUBBLE => world::RUBBLE_FALLING,
-                    protocol::ACT_PLACE if open && arg == protocol::ITEM_SPONGE => world::SPONGE,
-                    protocol::ACT_PLACE if open && arg == protocol::ITEM_ROCK => world::ROCK,
+                    protocol::ACT_PLACE if open && block_cell(arg).is_some() => block_cell(arg).unwrap(),
+                    protocol::ACT_PLACE if open && protocol::item_rock_kind(arg).is_some() => {
+                        world::ROCK_KINDS[protocol::item_rock_kind(arg).unwrap()]
+                    }
                     protocol::ACT_PLACE if t == world::AIR && arg == protocol::ITEM_WATER => world::WATER,
                     _ => continue,
                 };
@@ -556,12 +861,20 @@ impl Sim {
                 player.walls_unlocked = true;
             }
             protocol::UPGRADE_PICKAXE if player.pickaxe < PICKAXE_MAX => {
-                let cost = player.pickaxe as u32 + 1;
+                let cost = (1u32 << (player.pickaxe + 1)) - 1;
                 if player.quartz < cost {
                     return ActResult::NoResources;
                 }
                 player.quartz -= cost;
                 player.pickaxe += 1;
+            }
+            protocol::UPGRADE_STRIKE if (player.strike as usize) < STRIKE_COSTS.len() => {
+                let cost = STRIKE_COSTS[player.strike as usize];
+                if player.amethyst < cost {
+                    return ActResult::NoResources;
+                }
+                player.amethyst -= cost;
+                player.strike += 1;
             }
             _ => return ActResult::WrongTarget,
         }
@@ -671,6 +984,16 @@ impl Sim {
         put_u32(&mut m, p.quartz);
         m.push(p.pickaxe);
         m.push(p.walls_unlocked as u8);
+        put_u32(&mut m, p.amethyst);
+        m.push(p.strike);
+        put_u32(&mut m, p.dirt);
+        for &n in &p.deep {
+            put_u32(&mut m, n);
+        }
+        put_u32(&mut m, p.coral);
+        put_u32(&mut m, p.ember);
+        put_u32(&mut m, p.lava);
+        put_u32(&mut m, p.opal);
         // Several tabs may share one player: keep them all in sync.
         let token = client.token.clone();
         let ids: Vec<u64> =
@@ -689,6 +1012,7 @@ impl Sim {
         put_u32(&mut m, self.record_depth);
         m.push(self.rain_strength);
         put_u16(&mut m, (self.speed() * 100.0).round() as u16);
+        m.push(self.upwelling_phase());
         m
     }
 
@@ -713,6 +1037,9 @@ impl Sim {
 
     fn remove_client(&mut self, id: u64) {
         if let Some(c) = self.clients.remove(&id) {
+            if !self.clients.values().any(|o| o.ip == c.ip) {
+                self.ip_slots.remove(&c.ip);
+            }
             self.count_players();
             for chunk in c.chunks {
                 self.subscribers[chunk as usize].retain(|&s| s != id);
@@ -721,14 +1048,63 @@ impl Sim {
     }
 
     /// Save the world and players. In the background, the file writing runs on its own thread.
+    /// Send one client the leaderboard and their own place on it. Worked out at most once a second, however
+    /// many players ask.
+    fn send_leaders(&mut self, id: u64) {
+        let Some(client) = self.clients.get(&id) else { return };
+        let token = client.token.clone();
+        let now = Instant::now();
+        if self.leaders_at.is_none_or(|t| now - t >= Duration::from_secs(1)) {
+            let mut all: Vec<(u32, String)> =
+                self.players.iter().filter(|(_, p)| p.cells_mined > 0).map(|(t, p)| (p.cells_mined, t.clone())).collect();
+            all.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            self.leaders = all;
+            self.leaders_at = Some(now);
+        }
+        let put_name = |m: &mut Vec<u8>, token: &str| {
+            let name = display_name(token);
+            m.push(name.len() as u8);
+            m.extend_from_slice(name.as_bytes());
+        };
+        let mut m = vec![protocol::S_LEADERS];
+        let top = &self.leaders[..self.leaders.len().min(LEADERS_SHOWN)];
+        m.push(top.len() as u8);
+        for (mined, t) in top {
+            put_name(&mut m, t);
+            put_u32(&mut m, *mined);
+        }
+        let mined = self.players.get(&token).map_or(0, |p| p.cells_mined);
+        let rank = self.leaders.iter().filter(|(n, _)| *n > mined).count() + 1;
+        put_u32(&mut m, rank as u32);
+        put_u32(&mut m, mined);
+        put_name(&mut m, &token);
+        self.send(id, m);
+    }
+
+    /// Send this step's announcements to everyone.
+    fn send_announcements(&mut self) {
+        for text in std::mem::take(&mut self.announcements) {
+            println!("announced: {text}");
+            let mut m = vec![protocol::S_ANNOUNCE];
+            put_u16(&mut m, text.len() as u16);
+            m.extend_from_slice(text.as_bytes());
+            let ids: Vec<u64> = self.clients.keys().copied().collect();
+            for id in ids {
+                self.send(id, m.clone());
+            }
+        }
+    }
+
     fn save(&self, background: bool) {
         let world = self.world.to_bytes();
         let players = serde_json::to_vec(&self.players).expect("players serialise");
+        let milestones = serde_json::to_vec(&self.milestones).expect("milestones serialise");
         let dir = self.data_dir.clone();
         let write = move || {
             let result = std::fs::create_dir_all(&dir)
                 .and_then(|_| world::write_atomic(&dir.join("world.bin"), &world))
-                .and_then(|_| world::write_atomic(&dir.join("players.json"), &players));
+                .and_then(|_| world::write_atomic(&dir.join("players.json"), &players))
+                .and_then(|_| world::write_atomic(&dir.join("milestones.json"), &milestones));
             if let Err(e) = result {
                 eprintln!("saving failed: {e}");
             }
@@ -756,10 +1132,70 @@ mod tests {
     }
 
     #[test]
+    fn many_players_on_one_address_share_three_cooldowns() {
+        let world = World::generate(1024, 512, 3);
+        let mut sim = Sim::new(world, std::env::temp_dir().join("mine-together-test-none"));
+        let ip = IpAddr::from([203, 0, 113, 7]);
+        let mut keep = Vec::new();
+        for id in 1..=5u64 {
+            let (outbox, rx) = tokio::sync::mpsc::channel(1024);
+            keep.push(rx);
+            sim.handle(Cmd::Connect { id, token: format!("griefer-{id}"), dev: false, ip, limited: true, outbox });
+        }
+        assert_eq!(sim.players_online, IP_SLOTS, "five players on one address count as three");
+        // Five players dig at once: three get through, the other two wait for a shared cooldown.
+        let results: Vec<ActResult> = (1..=5u64)
+            .map(|id| {
+                let x = sim.world.w / 2 + 20 + id as usize * 3;
+                sim.act(id, protocol::ACT_DIG, x as u32, sim.world.surface[x] as u32, 0)
+            })
+            .collect();
+        assert_eq!(results.iter().filter(|&&r| r == ActResult::Ok).count(), 3, "{results:?}");
+        assert_eq!(results.iter().filter(|&&r| r == ActResult::Cooldown).count(), 2, "{results:?}");
+        // Connections beyond the limit are refused.
+        for id in 6..=20u64 {
+            let (outbox, rx) = tokio::sync::mpsc::channel(1024);
+            keep.push(rx);
+            sim.handle(Cmd::Connect { id, token: format!("griefer-{id}"), dev: false, ip, limited: true, outbox });
+        }
+        assert_eq!(sim.clients.len(), MAX_CONNECTIONS_PER_IP);
+    }
+
+    #[test]
+    fn display_names_are_stable_and_varied() {
+        assert_eq!(display_name("abc"), display_name("abc"));
+        let names: HashSet<String> = (0..200).map(|k| display_name(&format!("token-{k}"))).collect();
+        assert!(names.len() > 190, "only {} different names for 200 players", names.len());
+        assert!(names.iter().all(|n| n.split(' ').count() == 3));
+    }
+
+    #[test]
+    fn depth_milestones() {
+        assert_eq!(next_depth_milestone(0), 25);
+        assert_eq!(next_depth_milestone(25), 50);
+        assert_eq!(next_depth_milestone(99), 100);
+        assert_eq!(next_depth_milestone(100), 150);
+        assert_eq!(next_depth_milestone(260), 300);
+    }
+
+    #[test]
     fn springs_are_gentler_for_small_groups() {
         assert!((spring_amount(1) - 0.2).abs() < 0.01);
         assert!((spring_amount(10) - 0.6).abs() < 0.01);
         assert_eq!(spring_amount(100), 1.0);
+    }
+
+    #[test]
+    fn the_upwelling_shows_only_while_it_is_on() {
+        let mut sim = Sim::new(World::generate(1024, 512, 3), std::env::temp_dir().join("mine-together-test-none"));
+        assert_eq!(*sim.stats().last().unwrap(), 0, "no Upwelling on a fresh server");
+        sim.stir(false);
+        assert_eq!(*sim.stats().last().unwrap(), 1);
+        for _ in 0..=STIR_TICKS {
+            sim.ticks += 1;
+            sim.upwelling();
+        }
+        assert_eq!(*sim.stats().last().unwrap(), 2);
     }
 
     #[test]
@@ -781,7 +1217,8 @@ mod tests {
         let world = World::generate(1024, 512, 3);
         let mut sim = Sim::new(world, std::env::temp_dir().join("mine-together-test-none"));
         let (outbox, _rx) = tokio::sync::mpsc::channel(1024);
-        sim.handle(Cmd::Connect { id: 1, token: "tester".into(), dev: false, outbox });
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        sim.handle(Cmd::Connect { id: 1, token: "tester".into(), dev: false, ip, limited: false, outbox });
         let (x, y) = (sim.world.w / 2, sim.world.surface[sim.world.w / 2] as usize - 1);
         sim.players.get_mut("tester").unwrap().rock = 12;
         assert_eq!(sim.act(1, protocol::ACT_WALL, x as u32, y as u32, 0), ActResult::Locked);
@@ -790,11 +1227,16 @@ mod tests {
         assert_eq!(sim.buy(1, protocol::UPGRADE_WALLS), ActResult::WrongTarget, "already unlocked");
 
         let p = sim.players.get_mut("tester").unwrap();
-        p.quartz = 3;
+        p.quartz = 6;
         assert_eq!(sim.buy(1, protocol::UPGRADE_PICKAXE), ActResult::Ok); // level 1 costs 1
-        assert_eq!(sim.buy(1, protocol::UPGRADE_PICKAXE), ActResult::Ok); // level 2 costs 2
+        assert_eq!(sim.buy(1, protocol::UPGRADE_PICKAXE), ActResult::Ok); // level 2 costs 3
         assert_eq!(sim.buy(1, protocol::UPGRADE_PICKAXE), ActResult::NoResources);
-        assert_eq!(sim.players["tester"].pickaxe, 2);
-        assert_eq!(sim.players["tester"].quartz, 0);
+        assert_eq!(sim.players["tester"].pickaxe, 2); // level 3 costs 7, 2 left
+        assert_eq!(sim.players["tester"].quartz, 2);
+
+        sim.players.get_mut("tester").unwrap().amethyst = 12;
+        assert_eq!(sim.buy(1, protocol::UPGRADE_STRIKE), ActResult::Ok); // 3
+        assert_eq!(sim.buy(1, protocol::UPGRADE_STRIKE), ActResult::NoResources); // 10 more needed, 9 left
+        assert_eq!(sim.players["tester"].strike, 1);
     }
 }

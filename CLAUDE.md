@@ -12,22 +12,31 @@ work. Gameplay ideas marked *proposal* there are not decided yet; ask before bui
 - Only exposed cells (next to air) are visible; the next 1-2 cells behind them are shown darkened; everything else is
   black. Hidden cells never leave the server, so materials cannot be found with the browser dev tools.
 - Players act only on visible cells that touch open air, with a cooldown per action: only the top layer of a lake can be
-  scooped, and a lake bed cannot be dug while water covers it.
+  scooped, and a lake bed cannot be dug while water covers it. Exception: walls, which are always visible with the cells
+  next to them, and can be built on into open cells (air, water) next to another wall.
+- Kinds of rock, each its own resource: a dirt crust, then layers of stone, granite, slate, basalt, darkstone. Deeper
+  layers take more hits (1, 3, 5, 8, 12; layers blend in patches at the boundaries) and hold smaller rooms
+  before caving in. Amethyst (from 140 m) buys heavy strikes: 2, then 3 damage per hit.
 - Sight goes through air without limit but only 4 cells deep into water, and always follows the current world: when a
   hole floods, what is deep under the water goes dark again.
 - Cell types: air, rock (mined for a resource, can be placed back), water (falls and spreads every server tick; scooped
   water can be poured out again), wall (built by players
-  with mined rock; three hits to break, repairable; unlocked for 10 rock), materials found by depth (spongestone,
+  with mined rock; three hits to break, repairable; unlocked for 10 rock), materials found by depth (spongerock,
   which soaks up water once placed; quartz, the lowest tier of upgrade crystals, spent on pickaxe upgrades in the
-  Upgrades panel), rubble (dropped for 1 rock; falls, sinks through water and heaps up like gravel, to fill flooded
+  Upgrades panel; swellcoral, found as reefs in water pockets, which once planted grows into water and turns it
+  into coral; emberstone, in thin seams, which boils water into steam that wears down walls and rock), rubble (dropped for 1 rock; falls, sinks through water and heaps up like gravel, to fill flooded
   shafts and plug leaks), damp rock (opens a spring when dug: it pours water until its sides are plugged), cracked
   ceiling (rooms wider than 30 cells cave in as rubble unless propped up), bedrock (unbreakable; the world's bottom).
   Gems as paint were removed.
 - The world is an island in an endless ocean (Made in Abyss style): ramps rise from the shore to a rim, a hilly bowl lies
   between the rims, players start digging at its bottom. The ocean at the edges is endless and can be breached by
-  digging (it pours in at a limited rate, so a crowd can stop it); the world's edge is never visible.
+  digging: it presses on every opening at once and fills what it reaches up to sea level (the two edge columns below
+  sea level are the ocean: always water, never running empty; everything beyond is drawn, not simulated); the
+  world's edge is never visible.
 - Only open space connected to the sky or the ocean is lit: a tunnel sealed with a wall goes dark and out of reach.
-- Water comes from pockets found while digging and from rain events at the surface. Players can collect water cell by
+- Water comes from pockets found while digging and from rain events at the surface.
+- The Upwelling (event): molten veins rise from the bottom, one erupts at the surface and builds a volcano of lava
+  rock; water hardens magma, its heat breaks walls. The veins cool into lava rock with materials along them. Players can collect water cell by
   cell, like mining.
 - Cooldowns: about 1-3 seconds for mining and collecting water, longer for building. They scale with the players online: twice as fast
   alone, normal at 100 players, half as fast at 1000.
@@ -55,7 +64,7 @@ work. Gameplay ideas marked *proposal* there are not decided yet; ask before bui
   server console, resets, map, bots, deploy). Keep it up to date whenever a command, script or setting changes.
 
 - `server/` Rust game server. `cargo run --release` (in `server/`) listens on port 8080 and saves to `server/data/`.
-  Console commands in its window: `rain`, `save`, `stats`, `quit`. `cargo test` runs the world tests.
+  Console commands in its window: `rain`, `upwell`, `cataclysm`, `save`, `stats`, `quit`. `cargo test` runs the world tests.
 - `client/` TypeScript + WebGL2 client. `npm run dev` (in `client/`) serves it on http://localhost:5173 and passes
   `/ws` on to the server. `npm run check` type-checks.
 - Dev mode for testing alone: the server prints a link `http://localhost:5173/?dev=KEY` (key in

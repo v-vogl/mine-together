@@ -56,6 +56,8 @@ Type these into the server's window and press Enter:
 | Command | What it does |
 |---|---|
 | `rain` | start a random rain shower (`rain light`, `rain normal`, `rain heavy` for a strength) |
+| `upwell` | start an Upwelling: the deep stirs for 30 s, then magma veins rise and a volcano erupts |
+| `cataclysm` | console only: like `upwell` at full strength, but four times the veins and five supervolcanoes spread over the island (each about three times the size); takes about 9 minutes in all |
 | `save` | save the world now (it also saves every minute and when it stops) |
 | `stats` | show players online, record depth and load |
 | `quit` | save and stop (same as Ctrl+C) |
@@ -74,6 +76,7 @@ everyone's rock, quartz and upgrades; use just the one you need. Start the serve
 world anyway.
 
 Reset only yourself (in the browser): F12, Console tab, type `localStorage.removeItem("mt-token")`, Enter, reload.
+Copy your recovery code first (Esc in the game) if you want to come back to that player later.
 
 ## Map picture
 
@@ -98,6 +101,9 @@ node tools/bots.mjs 100 60
 ```
 node tools/bots.mjs 500 300 --roles=digger:6,explorer:2,builder:1,capper:0.5,flooder:0.5
 ```
+Against the online server (all bots come from your one internet address, which normally counts as at most 3
+players), add the dev key so they are not limited: `--key=KEY` (on the VPS the key is in `/var/lib/mine-together/dev-key.txt`).
+
 Roles: `digger`, `explorer`, `builder` (defends), `capper` (griefer: walls over shafts), `flooder` (griefer: breaks
 through to the ocean). Order is always: number of bots, seconds, then options.
 

@@ -28,7 +28,7 @@ if errorlevel 1 (
 popd
 
 rem The server listens only on this PC (127.0.0.1); friends reach it through the tunnel alone.
-start "Mine Together server" cmd /k "cd /d "%~dp0server" && set "HOST=127.0.0.1" && set "STATIC_DIR=%~dp0client\dist" && cargo run --release"
+start "Mine Together server" cmd /k "cd /d "%~dp0server" && set "HOST=127.0.0.1" && set "TRUST_IP_HEADER=cf-connecting-ip" && set "STATIC_DIR=%~dp0client\dist" && cargo run --release"
 
 echo.
 echo Starting the tunnel. Look for the line with  https://....trycloudflare.com  below and send that link.

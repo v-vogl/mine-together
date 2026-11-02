@@ -13,9 +13,17 @@
       <span class="title">Mine Together</span>
       <span id="online">connecting…</span>
       <span id="speed" title="Actions are faster with few players and slower in big crowds"></span>
-      <span id="record"></span>
       <span id="rain" hidden>rain!</span>
+      <span id="upwelling" hidden></span>
+      <button id="leaders-button" title="Top miners">🏆</button>
+      <button id="menu-button" title="Menu (Esc)">☰</button>
     </header>
+    <div id="leaders" hidden>
+      <div class="shop-head"><b>Top miners</b><span class="muted">blocks mined</span></div>
+      <ol id="leaders-list"></ol>
+      <div id="leaders-me"></div>
+      <div class="muted leaders-foot">Press L to minimize</div>
+    </div>
     <div id="cell-info"></div>
     <div id="dev" hidden>
       <b>DEV</b> brush <input type="range" id="brush" min="1" max="41" step="2" value="1" />
@@ -23,6 +31,7 @@
     </div>
 
     <div id="toast"></div>
+    <div id="hint" hidden>Click a cell to dig</div>
     <div id="notices"></div>
 
     <footer id="bottom">
@@ -32,33 +41,79 @@
           <span class="slot-icon" id="dig-icon">⛏</span><span class="slot-name" id="dig-label">Dig</span>
         </button>
         <span class="divider"></span>
-        <button class="slot tool" data-tool="rock" title="Place rock: a plain block of stone">
-          <span class="slot-icon swatch rock-swatch"></span><span class="slot-name">Rock</span>
+        <button class="slot tool rock-kind" data-tool="dirt" title="Place dirt">
+          <span class="slot-icon swatch dirt-swatch"></span><span class="slot-name">Dirt</span>
+          <span class="price">×<span id="dirt">0</span></span>
+        </button>
+        <button class="slot tool rock-kind" data-tool="rock" title="Place stone">
+          <span class="slot-icon swatch rock-swatch"></span><span class="slot-name">Stone</span>
           <span class="price">×<span id="rock">0</span></span>
+        </button>
+        <button class="slot tool rock-kind" data-tool="granite" hidden title="Place granite">
+          <span class="slot-icon swatch granite-swatch"></span><span class="slot-name">Granite</span>
+          <span class="price">×<span id="granite">0</span></span>
+        </button>
+        <button class="slot tool rock-kind" data-tool="slate" hidden title="Place slate">
+          <span class="slot-icon swatch slate-swatch"></span><span class="slot-name">Slate</span>
+          <span class="price">×<span id="slate">0</span></span>
+        </button>
+        <button class="slot tool rock-kind" data-tool="basalt" hidden title="Place basalt">
+          <span class="slot-icon swatch basalt-swatch"></span><span class="slot-name">Basalt</span>
+          <span class="price">×<span id="basalt">0</span></span>
+        </button>
+        <button class="slot tool rock-kind" data-tool="darkstone" hidden title="Place darkstone">
+          <span class="slot-icon swatch darkstone-swatch"></span><span class="slot-name">Darkstone</span>
+          <span class="price">×<span id="darkstone">0</span></span>
         </button>
         <button class="slot tool" data-tool="water" title="Pour out water you scooped up">
           <span class="slot-icon swatch water-swatch"></span><span class="slot-name">Water</span>
           <span class="price">×<span id="water">0</span></span>
         </button>
         <button class="slot tool" data-tool="sponge" id="sponge-tool" hidden
-          title="Place spongestone: soaks up water next to it">
+          title="Place spongerock">
           <span class="slot-icon swatch sponge-swatch"></span><span class="slot-name">Spongerock</span>
           <span class="price">×<span id="sponge">0</span></span>
         </button>
+        <button class="slot tool" data-tool="quartz" id="quartz-tool" hidden
+          title="Place quartz">
+          <span class="slot-icon swatch quartz-swatch"></span><span class="slot-name">Quartz</span>
+          <span class="price">×<span id="quartz">0</span></span>
+        </button>
+        <button class="slot tool" data-tool="amethyst" id="amethyst-tool" hidden
+          title="Place amethyst">
+          <span class="slot-icon swatch amethyst-swatch"></span><span class="slot-name">Amethyst</span>
+          <span class="price">×<span id="amethyst">0</span></span>
+        </button>
+        <button class="slot tool" data-tool="coral" id="coral-tool" hidden
+          title="Place swellcoral">
+          <span class="slot-icon swatch coral-swatch"></span><span class="slot-name">Swellcoral</span>
+          <span class="price">×<span id="coral">0</span></span>
+        </button>
+        <button class="slot tool" data-tool="ember" id="ember-tool" hidden
+          title="Place emberstone">
+          <span class="slot-icon swatch ember-swatch"></span><span class="slot-name">Emberstone</span>
+          <span class="price">×<span id="ember">0</span></span>
+        </button>
+        <button class="slot tool" data-tool="lava" id="lava-tool" hidden
+          title="Place lava rock">
+          <span class="slot-icon swatch lava-swatch"></span><span class="slot-name">Lava rock</span>
+          <span class="price">×<span id="lava">0</span></span>
+        </button>
+        <button class="slot tool" data-tool="opal" id="opal-tool" hidden title="Place a fire opal">
+          <span class="slot-icon swatch opal-swatch"></span><span class="slot-name">Fire opal</span>
+          <span class="price">×<span id="opal">0</span></span>
+        </button>
         <span class="divider"></span>
         <button class="slot tool" data-tool="rubble"
-          title="Drop rubble (1 rock): it falls and sinks through water, to fill a flooded shaft and plug a leak">
+          title="Drop rubble (1 stone)">
           <span class="slot-icon swatch rubble-swatch"></span><span class="slot-name">Rubble</span>
           <span class="price"><i class="swatch rock-swatch"></i>1</span>
         </button>
         <button class="slot tool" data-tool="wall" id="wall-tool" hidden
-          title="Build a wall that holds water, or repair a cracked one">
+          title="Build a wall, or repair a cracked one">
           <span class="slot-icon swatch wall-swatch"></span><span class="slot-name">Wall</span>
-          <span class="price"><i class="swatch rock-swatch"></i><span id="wall-cost">3</span></span>
+          <span class="price"><i class="swatch rock-swatch"></i><span id="wall-cost">2</span></span>
         </button>
-        <div id="inventory">
-          <span title="Quartz: spend it on upgrades" id="quartz-count" hidden><span class="swatch quartz-swatch"></span><b id="quartz">0</b></span>
-        </div>
         <button id="shop-button" hidden title="Upgrades">⚒<span class="label"> Upgrades</span></button>
       </div>
     </footer>
@@ -67,7 +122,7 @@
       <div class="shop-head"><b>Upgrades</b><button id="shop-close" title="Close">✕</button></div>
       <div class="offer" id="offer-walls">
         <span class="swatch wall-swatch"></span>
-        <div><b>Walls</b><br /><span class="muted">Build walls that hold back water and seal tunnels.</span></div>
+        <div><b>Walls</b><br /><span class="muted">Unlocks the Wall tool.</span></div>
         <button class="buy" id="buy-walls"></button>
       </div>
       <div class="offer" id="offer-pickaxe" hidden>
@@ -75,6 +130,36 @@
         <div><b id="pickaxe-name"></b><br /><span class="muted" id="pickaxe-text"></span></div>
         <button class="buy" id="buy-pickaxe"></button>
       </div>
+      <div class="offer" id="offer-strike" hidden>
+        <span class="swatch amethyst-swatch"></span>
+        <div><b id="strike-name"></b><br /><span class="muted" id="strike-text"></span></div>
+        <button class="buy" id="buy-strike"></button>
+      </div>
+    </div>
+
+    <div id="menu" hidden>
+      <div class="shop-head"><b>Menu</b><button id="menu-close" title="Close">✕</button></div>
+      <div>
+        <b>Your recovery code</b><br />
+        <span class="muted">Your progress is saved in this browser. To play on with it in another browser or on
+          another device, enter this code there. Keep it secret: anyone with it plays as you.</span>
+        <div class="code-row">
+          <input id="code-mine" readonly spellcheck="false" />
+          <button class="buy" id="code-show">Show</button>
+          <button class="buy" id="code-copy">Copy</button>
+        </div>
+      </div>
+      <div>
+        <b>Enter a recovery code</b><br />
+        <span class="muted">Continue a player from another browser. The player in this browser is replaced, so copy
+          its code first if you want to keep it.</span>
+        <div class="code-row">
+          <input id="code-enter" spellcheck="false" autocomplete="off" placeholder="xxxx-xxxx-…" />
+          <button class="buy" id="code-use">Load</button>
+        </div>
+        <div id="code-error" class="code-error" hidden>That is not a recovery code. Check for typos.</div>
+      </div>
+      <div class="muted leaders-foot">Press Esc to close</div>
     </div>
 
     <div id="overlay">Connecting to the world…</div>

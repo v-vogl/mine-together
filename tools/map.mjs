@@ -26,17 +26,32 @@ const surface = new Uint16Array(w);
 for (let x = 0; x < w; x++) surface[x] = buf.readUInt16LE(20 + x * 2);
 const cells = buf.subarray(20 + w * 2);
 
-const LAYERS = [[120, 84, 54], [148, 102, 64], [115, 110, 107], [84, 84, 97], [92, 56, 61]];
+// Stone, granite, slate, basalt, darkstone (as in the game's shader).
+const LAYERS = [[153, 133, 107], [163, 128, 120], [77, 84, 105], [51, 51, 59], [64, 28, 41]];
+const DIRT = [110, 71, 46];
+// Rock hit but not broken keeps its kind: runs of types from 32 for granite, slate, basalt and darkstone.
+const WORN = [[32, 2, 1], [34, 4, 2], [38, 7, 3], [45, 11, 4]];
 
 function colour(x, y, t) {
   if (t === 0) return y < surface[x] ? [140, 195, 245] : [48, 51, 66];
   if (t === 2) return [40, 100, 220];
   if (t >= 3 && t <= 5) return [143, 140, 148]; // walls
-  if (t === 6 || t === 7) return [219, 173, 56]; // spongestone
+  if (t === 6 || t === 7) return [219, 173, 56]; // spongerock
   if (t === 8 || t === 9) return [140, 128, 112]; // rubble
   if (t === 11) return [255, 170, 215]; // quartz
   if (t === 12 || t === 13) return [60, 200, 255]; // damp rock and springs
   if (t === 14) return [200, 60, 40]; // cracked ceiling
+  if (t >= 26 && t <= 29) return LAYERS[t - 25]; // rock of the deeper layers
+  if (t === 30) return [170, 90, 230]; // amethyst
+  if (t === 56 || t === 57) return [240, 110, 95]; // swellcoral
+  if (t === 58) return [255, 120, 30]; // emberstone
+  if (t === 15 || t === 16) return [255, 90, 20]; // magma and molten veins
+  if (t === 17 || t === 18) return [70, 62, 66]; // lava rock
+  if (t === 19) return [120, 255, 200]; // fire opal
+  if (t === 59) return [225, 230, 235]; // steam
+  if (t === 1) return LAYERS[0];
+  if (t === 31) return DIRT;
+  for (const [base, n, layer] of WORN) if (t >= base && t < base + n) return LAYERS[layer];
   if (t === 10) return [40, 40, 52];
   const band = Math.min(Math.max((y - surface[x]) / 160, 0), 3.999);
   const i = Math.floor(band), f = band - i < 0.75 ? 0 : (band - i - 0.75) / 0.25;
