@@ -1,0 +1,8 @@
+# Caddy serves the game page and passes /ws on to the game server. It gets and renews the HTTPS
+# certificate for the domain by itself. setup.sh fills in the domain.
+{DOMAIN} {
+	encode gzip
+	reverse_proxy /ws 127.0.0.1:8080
+	root * /var/www/mine-together
+	file_server
+}

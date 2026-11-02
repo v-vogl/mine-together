@@ -1,0 +1,21 @@
+# systemd service for the game server. Installed to /etc/systemd/system/ by setup.sh.
+[Unit]
+Description=Mine Together game server
+After=network.target
+
+[Service]
+User=minetogether
+WorkingDirectory=/opt/mine-together
+ExecStart=/opt/mine-together/mine-together-server
+Environment=HOST=127.0.0.1 PORT=8080 DATA_DIR=/var/lib/mine-together CONSOLE_FIFO=/run/mine-together/console
+# The console pipe: `echo rain | sudo tee /run/mine-together/console`
+RuntimeDirectory=mine-together
+ExecStartPre=/usr/bin/mkfifo -m 660 /run/mine-together/console
+# The server saves the world when it gets Ctrl+C (SIGINT), so stop it that way.
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

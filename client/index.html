@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Mine Together</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+
+    <header id="top">
+      <span class="title">Mine Together</span>
+      <span id="online">connecting…</span>
+      <span id="speed" title="Actions are faster with few players and slower in big crowds"></span>
+      <span id="record"></span>
+      <span id="rain" hidden>rain!</span>
+    </header>
+    <div id="cell-info"></div>
+    <div id="dev" hidden>
+      <b>DEV</b> brush <input type="range" id="brush" min="1" max="41" step="2" value="1" />
+      <span id="brush-size">1×1</span> <span class="muted">[ ] to change</span>
+    </div>
+
+    <div id="toast"></div>
+    <div id="notices"></div>
+
+    <footer id="bottom">
+      <div id="cooldown"><div id="cooldown-fill"></div></div>
+      <div id="toolbar">
+        <button class="slot tool" data-tool="dig" title="Dig rock, crack walls, scoop water">
+          <span class="slot-icon" id="dig-icon">⛏</span><span class="slot-name" id="dig-label">Dig</span>
+        </button>
+        <span class="divider"></span>
+        <button class="slot tool" data-tool="rock" title="Place rock: a plain block of stone">
+          <span class="slot-icon swatch rock-swatch"></span><span class="slot-name">Rock</span>
+          <span class="price">×<span id="rock">0</span></span>
+        </button>
+        <button class="slot tool" data-tool="water" title="Pour out water you scooped up">
+          <span class="slot-icon swatch water-swatch"></span><span class="slot-name">Water</span>
+          <span class="price">×<span id="water">0</span></span>
+        </button>
+        <button class="slot tool" data-tool="sponge" id="sponge-tool" hidden
+          title="Place spongestone: soaks up water next to it">
+          <span class="slot-icon swatch sponge-swatch"></span><span class="slot-name">Spongerock</span>
+          <span class="price">×<span id="sponge">0</span></span>
+        </button>
+        <span class="divider"></span>
+        <button class="slot tool" data-tool="rubble"
+          title="Drop rubble (1 rock): it falls and sinks through water, to fill a flooded shaft and plug a leak">
+          <span class="slot-icon swatch rubble-swatch"></span><span class="slot-name">Rubble</span>
+          <span class="price"><i class="swatch rock-swatch"></i>1</span>
+        </button>
+        <button class="slot tool" data-tool="wall" id="wall-tool" hidden
+          title="Build a wall that holds water, or repair a cracked one">
+          <span class="slot-icon swatch wall-swatch"></span><span class="slot-name">Wall</span>
+          <span class="price"><i class="swatch rock-swatch"></i><span id="wall-cost">3</span></span>
+        </button>
+        <div id="inventory">
+          <span title="Quartz: spend it on upgrades" id="quartz-count" hidden><span class="swatch quartz-swatch"></span><b id="quartz">0</b></span>
+        </div>
+        <button id="shop-button" hidden title="Upgrades">⚒<span class="label"> Upgrades</span></button>
+      </div>
+    </footer>
+
+    <div id="shop" hidden>
+      <div class="shop-head"><b>Upgrades</b><button id="shop-close" title="Close">✕</button></div>
+      <div class="offer" id="offer-walls">
+        <span class="swatch wall-swatch"></span>
+        <div><b>Walls</b><br /><span class="muted">Build walls that hold back water and seal tunnels.</span></div>
+        <button class="buy" id="buy-walls"></button>
+      </div>
+      <div class="offer" id="offer-pickaxe" hidden>
+        <span class="icon">⛏</span>
+        <div><b id="pickaxe-name"></b><br /><span class="muted" id="pickaxe-text"></span></div>
+        <button class="buy" id="buy-pickaxe"></button>
+      </div>
+    </div>
+
+    <div id="overlay">Connecting to the world…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

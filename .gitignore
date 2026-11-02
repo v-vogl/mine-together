@@ -1,0 +1,7 @@
+# Rust build output
+/server/target/
+# Saved world and player data from local runs
+/server/data/
+# Client
+node_modules/
+/client/dist/
